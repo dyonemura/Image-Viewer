@@ -35,7 +35,7 @@ def load_pil(img):
     return img.convert("RGB")
 
 def load_cv2(img):
-    """Always returns a grayscale numpy array."""
+    """Always returns a grayscale OpenCV image. Handles both file paths and PIL images."""
     if isinstance(img, str):
         return cv2.imread(img, cv2.IMREAD_GRAYSCALE)
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)

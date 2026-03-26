@@ -6,19 +6,25 @@ from tkinter import Button, Entry, Label, Toplevel, filedialog, messagebox
 from PIL import Image, ImageEnhance, ImageFilter, ImageTk
 from PIL.ExifTags import TAGS
 from send2trash import send2trash
+import datetime
 
 from DuplicateDetector import duplicate_check
 
 class ImageFunctions:
-    def __init__(self, root, image_label, status_label):
+    def __init__(self, root, image_label, status_label, settings):
         self.root = root
         self.image_label = image_label
         self.status_label = status_label
+        self.apply_settings(settings)
         self.image_files = []
         self.current_index = 0
         self.original_image = None
-        self.fast_delete = False
-        self.dupe_recycle_bin = False
+
+    # A helper function to apply settings from the settings manager to the instance variables
+    def apply_settings(self, settings):
+        """Apply a settings dict to the instance."""
+        self.confirm_deletes = settings.get("confirm_deletes", True)
+        self.fast_delete = settings.get("fast_delete", False)
 
     def load_folder(self, file_path):
         """Load all images in the same folder as the selected image, using bisect for efficient indexing."""
@@ -56,7 +62,7 @@ class ImageFunctions:
         self.original_image = Image.open(file_path)
         self.current_path = file_path
         self.resize_image()
-        self.status_label.config(text=f"Image loaded: {os.path.basename(file_path)}")
+        self.status_label.config(text=f"{os.path.basename(file_path)}")
 
     def resize_image(self, event=None):
         """Resize the currently displayed image to fit within the window while preserving aspect ratio."""
@@ -85,16 +91,10 @@ class ImageFunctions:
         self.image_label.config(image=photo)
         self.image_label.photo = photo
 
-    def next_image(self):
-        """Display the next image in the folder."""
+    def navigate(self, direction):
+        """Display the next or previous image in the folder. Pass 1 for next, -1 for prev."""
         if self.image_files:
-            self.current_index = (self.current_index + 1) % len(self.image_files)
-            self.display_image(self.image_files[self.current_index])
-    
-    def prev_image(self):
-        """Display the previous image in the folder."""
-        if self.image_files:
-            self.current_index = (self.current_index - 1) % len(self.image_files)
+            self.current_index = (self.current_index + direction) % len(self.image_files)
             self.display_image(self.image_files[self.current_index])
         
     def delete_image(self):
@@ -104,8 +104,10 @@ class ImageFunctions:
             return
 
         file_to_delete = self.image_files[self.current_index]
-        if not messagebox.askyesno("Delete Image", f"Are you sure you want to delete {os.path.basename(file_to_delete)}?"):
-            return
+
+        if not self.fast_delete and self.confirm_deletes:
+            if not messagebox.askyesno("Delete Image", f"Are you sure you want to delete {os.path.basename(file_to_delete)}?"):
+                return
 
         send2trash(file_to_delete)
         self.image_files.pop(self.current_index)
@@ -178,34 +180,39 @@ class ImageFunctions:
         try:
             with Image.open(file_path) as img:
                 width, height = img.size
-                file_size = os.path.getsize(file_path)
+                raw_size = os.path.getsize(file_path)
 
-                # --- EXIF extraction ---
+                if raw_size < 1024:
+                    file_size = f"{raw_size} bytes"
+                elif raw_size < 1024 ** 2:
+                    file_size = f"{raw_size / 1024:.2f} KB"
+                elif raw_size < 1024 ** 3:
+                    file_size = f"{raw_size / 1024 ** 2:.2f} MB"
+                else:
+                    file_size = f"{raw_size / 1024 ** 3:.2f} GB"
+
+                human = datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%B %d, %Y %I:%M %p")
+
                 exif_data = img.getexif()
-                readable_exif = {}
-
+                camera_make = "Unknown"
+                camera_model = "Unknown"
                 for tag_id, value in exif_data.items():
                     tag = TAGS.get(tag_id, tag_id)
-                    readable_exif[tag] = value
+                    if tag == "Make":
+                        camera_make = value
+                    elif tag == "Model":
+                        camera_model = value
 
-                # Common useful EXIF fields
-                creation_time = readable_exif.get("DateTimeOriginal", "Unknown")
-                camera_model = readable_exif.get("Model", "Unknown")
-                camera_make = readable_exif.get("Make", "Unknown")
-                print(readable_exif)
-                
-                info = (
-                    f"Dimensions: {width} x {height}\n"
-                    f"File Size: {file_size // 1024} KB\n"
-                    f"Created: {creation_time}\n"
-                    f"Camera Make: {camera_make}\n"
-                    f"Camera Model: {camera_model}\n"
-                    f"Path: {file_path}"
-                )
+            messagebox.showinfo("Metadata", (
+                f"Dimensions: {width} x {height}\n"
+                f"File Size: {file_size}\n"
+                f"Created: {human}\n"
+                f"Camera Make: {camera_make}\n"
+                f"Camera Model: {camera_model}\n"
+                f"Path: {file_path}"
+            ))
 
-                messagebox.showinfo("Metadata", info)
-
-        except Exception as e:
+        except Exception:
             messagebox.showinfo("Metadata", "Metadata unavailable.")
 
     
@@ -301,35 +308,21 @@ class ImageFunctions:
         dialog.bind("<Return>", lambda e: apply())
         Button(dialog, text="Rotate", command=apply).pack(pady=5)
 
-    def fast_delete_toggle(self):
-        """Toggle fast delete mode, which allows using left/right arrow keys to quickly delete or move images without confirmation."""
-        self.fast_delete = not self.fast_delete
-
+    def fast_delete_func(self):
+        """Toggle fast delete mode — left arrow deletes, right arrow moves."""
+        self.root.bind("<Left>", lambda e: self.navigate(-1))
+        self.root.bind("<Right>", lambda e: self.navigate(1))
         if self.fast_delete:
-            self.root.bind("<Left>", self.fast_delete_left)
-            self.root.bind("<Right>", self.fast_delete_right)
-            self.status_label.config(text="Fast delete mode ON — ← Delete  |  → Move")
+            self.root.bind("<Down>", lambda e: self.delete_image())
+            self.root.bind("<Up>", self.fast_delete_up)
+            self.status_label.config(text="Fast delete mode ON")
         else:
-            self.root.unbind("<Left>")
-            self.root.unbind("<Right>")
+            self.root.unbind("<Down>")
+            self.root.unbind("<Up>")
             self.status_label.config(text="Fast delete mode OFF")
 
-    def fast_delete_left(self, event):
-        """Binds left arrow to send the current image to the recycle bin without confirmation."""
-        if not self.image_files:
-            return
-        file = self.image_files[self.current_index]
-        send2trash(file)
-        self.image_files.pop(self.current_index)
-        if self.image_files:
-            self.current_index = min(self.current_index, len(self.image_files) - 1)
-            self._render_image()
-        else:
-            self.image_label.config(image="")
-            self.status_label.config(text="No images left.")
-
-    def fast_delete_right(self, event):
-        """Right arrow — move to Favs folder."""
+    def fast_delete_up(self, event):
+        """Up arrow — move to Favs folder."""
         if not self.image_files:
             return
         file = self.image_files[self.current_index]
