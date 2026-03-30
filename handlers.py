@@ -9,6 +9,7 @@ from send2trash import send2trash
 import datetime
 
 from DuplicateDetector import duplicate_check
+from autolabeler import get_clip_label, initialize_clip_labels
 
 class ImageFunctions:
     def __init__(self, root, image_label, status_label, settings):
@@ -19,12 +20,17 @@ class ImageFunctions:
         self.image_files = []
         self.current_index = 0
         self.original_image = None
+        self.stack_undo = []
+        self.stack_redo = []
+        self.current_rotation = 0
+        self.current_filter = None
 
     # A helper function to apply settings from the settings manager to the instance variables
     def apply_settings(self, settings):
         """Apply a settings dict to the instance."""
         self.confirm_deletes = settings.get("confirm_deletes", True)
         self.fast_delete = settings.get("fast_delete", False)
+        self.labels = settings.get("image_labels", [])
 
     def load_folder(self, file_path):
         """Load all images in the same folder as the selected image, using bisect for efficient indexing."""
@@ -243,7 +249,8 @@ class ImageFunctions:
             self._render_image()
             return
 
-        image = Image.open(self.image_files[self.current_index])
+        image = self.original_image.copy()
+        self.stack_undo.append(("filter", self.original_image.copy()))
 
         if filter_type == "grayscale":
             image = image.convert("L").convert("RGB")
@@ -256,6 +263,7 @@ class ImageFunctions:
         elif filter_type == "contour":
             image = image.filter(ImageFilter.CONTOUR)
 
+        self.original_image = image
         self._render_image(image)
 
     def _render_image(self, image=None):
@@ -265,13 +273,18 @@ class ImageFunctions:
         self.original_image = image
         self.resize_image()
     
-    def rotate_image(self, angle):
+    def rotate_image(self, angle, push_undo=True, absolute=False):
         """Rotate the current image by the specified angle and re-render it."""
         if not self.image_files:
             return
         
+        if push_undo:
+            self.stack_undo.append(("rotate", self.current_rotation))
+
         image = Image.open(self.image_files[self.current_index])
-        rotated = image.rotate(angle, expand=True)
+        self.current_rotation = angle if absolute else (self.current_rotation + angle) % 360
+        rotated = image.rotate(self.current_rotation, expand=True)
+
         self._render_image(rotated)
     
     def rotate_custom(self):
@@ -307,6 +320,44 @@ class ImageFunctions:
 
         dialog.bind("<Return>", lambda e: apply())
         Button(dialog, text="Rotate", command=apply).pack(pady=5)
+    
+    def undo(self):
+        """Undo the last transformation applied to the image."""
+        if not self.stack_undo:
+            self.status_label.config(text="Nothing to undo.")
+            return
+
+        last_action, value = self.stack_undo.pop()
+
+        if last_action == "rotate":
+            self.stack_redo.append((last_action, self.current_rotation))
+            self.rotate_image(value, push_undo=False, absolute=True)
+            self.status_label.config(text=f"Undid rotation — back to {value}°.")
+        elif last_action == "filter":
+            self.stack_redo.append((last_action, self.original_image.copy()))
+            self.original_image = value
+            self._render_image(value)
+            self.status_label.config(text="Undid filter.")
+        else:
+            self.status_label.config(text="Unknown action to undo.")
+    
+    def redo(self):
+        """Redo the last undone transformation."""
+        if not self.stack_redo:
+            self.status_label.config(text="Nothing to redo.")
+            return
+        
+        action, value = self.stack_redo.pop()
+        
+        if action == "rotate":
+            self.stack_undo.append((action, self.current_rotation))
+            self.rotate_image(value, push_undo=False, absolute=True)
+            self.status_label.config(text=f"Redid rotation of {value} degrees.")
+        elif action == "filter":
+            self.stack_undo.append((action, self.original_image.copy()))
+            self.original_image = value
+            self.status_label.config(text="Unknown action to redo.")
+
 
     def fast_delete_func(self):
         """Toggle fast delete mode — left arrow deletes, right arrow moves."""
@@ -322,18 +373,55 @@ class ImageFunctions:
             self.status_label.config(text="Fast delete mode OFF")
 
     def fast_delete_up(self, event):
-        """Up arrow — move to Favs folder."""
+        """Up arrow — move current image to Favs folder."""
         if not self.image_files:
             return
+
         file = self.image_files[self.current_index]
         favs_folder = os.path.join(os.path.dirname(file), "Favs")
         os.makedirs(favs_folder, exist_ok=True)
-        dest = self.unique_dest(favs_folder, os.path.basename(file))
-        shutil.move(file, dest)
+        shutil.move(file, self.unique_dest(favs_folder, os.path.basename(file)))
         self.image_files.pop(self.current_index)
+
         if self.image_files:
             self.current_index = min(self.current_index, len(self.image_files) - 1)
             self._render_image()
         else:
+            self.original_image = None
             self.image_label.config(image="")
             self.status_label.config(text="No images left.")
+
+    def _sort_by_clip(self, labels):
+        """Core sorting logic — moves all images into subfolders based on CLIP labels."""
+        folder = os.path.dirname(self.image_files[0])
+        count = len(self.image_files)
+        text_tokens = initialize_clip_labels(labels)
+
+        for subfolder in set(labels):
+            os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
+
+        for file in self.image_files:
+            label, _ = get_clip_label(file, labels, text_tokens)
+            labeled_folder = os.path.join(folder, label)
+            shutil.move(file, self.unique_dest(labeled_folder, os.path.basename(file)))
+
+        self.image_files.clear()
+        self.current_index = 0
+        self.original_image = None
+        self.image_label.config(image="")
+        self.status_label.config(text=f"Sorted {count} images into {len(labels)} label(s).")
+
+    def auto_sort_images(self):
+        """Sort images into subfolders based on user-defined CLIP labels."""
+        if not self.image_files:
+            self.status_label.config(text="No images loaded.")
+            return
+        self._sort_by_clip(self.labels)
+
+    def auto_sort_nsfw(self):
+        """Sort images into NSFW and SFW subfolders."""
+        if not self.image_files:
+            self.status_label.config(text="No images loaded.")
+            return
+        self._sort_by_clip(["NSFW photo", "SFW photo"])
+

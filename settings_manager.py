@@ -5,7 +5,12 @@ SETTINGS_FILE = "settings.json"
 
 DEFAULT_SETTINGS = {
     "confirm_deletes": True,
-    "fast_delete": False
+    "fast_delete": False,
+    "window_width": 800,
+    "window_height": 600,
+    "window_x": 100,
+    "window_y": 100,
+    "image_labels": []
 }
 
 def load_settings():
