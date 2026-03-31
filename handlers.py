@@ -8,8 +8,8 @@ from PIL.ExifTags import TAGS
 from send2trash import send2trash
 import datetime
 
-from DuplicateDetector import duplicate_check
-from autolabeler import get_clip_label, initialize_clip_labels
+from DuplicateDetector import DuplicateDetectorMain
+from autolabeler import CLIPLabeler
 
 class ImageFunctions:
     def __init__(self, root, image_label, status_label, settings):
@@ -24,6 +24,8 @@ class ImageFunctions:
         self.stack_redo = []
         self.current_rotation = 0
         self.current_filter = None
+        self.duplicate_detector = DuplicateDetectorMain()
+        self.autolabeler = CLIPLabeler()
 
     # A helper function to apply settings from the settings manager to the instance variables
     def apply_settings(self, settings):
@@ -145,22 +147,14 @@ class ImageFunctions:
         if not self.image_files:
             self.status_label.config(text="No images loaded.")
             return
-
-        current_image = self.image_files[self.current_index]
-        folder = os.path.dirname(current_image)
-
+        
         loading = Toplevel(self.root)
         loading.title("Please Wait")
         Label(loading, text="Sorting duplicates...", padx=20, pady=20).pack()
         loading.update()
 
-        duplicates = []
-
-        for i, img in enumerate(self.image_files):
-            if i != self.current_index:
-                is_dupe, reason = duplicate_check(current_image, img)
-                if is_dupe:
-                    duplicates.append((img, reason))
+        current_image, duplicates = self.duplicate_detector.find_duplicates(self.image_files, self.current_index)
+        folder = os.path.dirname(current_image)
 
         if duplicates:
             dupes_folder = os.path.join(folder, "Duplicates")
@@ -221,7 +215,6 @@ class ImageFunctions:
         except Exception:
             messagebox.showinfo("Metadata", "Metadata unavailable.")
 
-    
     def save_image(self):
         """Open a file dialog to save the currently displayed image to a new location."""
         if not self.image_files:
@@ -242,29 +235,32 @@ class ImageFunctions:
         except Exception as e:
             self.status_label.config(text=f"Error saving image: {e}")
 
-    def apply_filter(self, filter_type):
+    def apply_filter(self, filter_type, push_undo=True):
         if not self.image_files:
             return
-        if filter_type == "reset":
-            self._render_image()
-            return
 
-        image = self.original_image.copy()
-        self.stack_undo.append(("filter", self.original_image.copy()))
+        if push_undo:
+            self.stack_undo.append(("filter", self.current_filter))
 
-        if filter_type == "grayscale":
-            image = image.convert("L").convert("RGB")
-        elif filter_type == "blur":
-            image = image.filter(ImageFilter.BLUR)
-        elif filter_type == "sharpen":
-            image = image.filter(ImageFilter.SHARPEN)
-        elif filter_type == "brightness":
-            image = ImageEnhance.Brightness(image).enhance(1.5)
-        elif filter_type == "contour":
-            image = image.filter(ImageFilter.CONTOUR)
+        self.current_filter = None if filter_type == "reset" else filter_type
+        self._render_image(self._get_edited_image())
 
-        self.original_image = image
-        self._render_image(image)
+    def _get_edited_image(self):
+        image = Image.open(self.image_files[self.current_index])
+        if self.current_rotation:
+            image = image.rotate(self.current_rotation, expand=True)
+        if self.current_filter:
+            if self.current_filter == "grayscale":
+                image = image.convert("L").convert("RGB")
+            elif self.current_filter == "blur":
+                image = image.filter(ImageFilter.BLUR)
+            elif self.current_filter == "sharpen":
+                image = image.filter(ImageFilter.SHARPEN)
+            elif self.current_filter == "brightness":
+                image = ImageEnhance.Brightness(image).enhance(1.5)
+            elif self.current_filter == "contour":
+                image = image.filter(ImageFilter.CONTOUR)
+        return image
 
     def _render_image(self, image=None):
         if image is None:
@@ -273,19 +269,13 @@ class ImageFunctions:
         self.original_image = image
         self.resize_image()
     
-    def rotate_image(self, angle, push_undo=True, absolute=False):
-        """Rotate the current image by the specified angle and re-render it."""
+    def rotate_image(self, angle, push_undo=True, absolute=True):
         if not self.image_files:
             return
-        
         if push_undo:
             self.stack_undo.append(("rotate", self.current_rotation))
-
-        image = Image.open(self.image_files[self.current_index])
         self.current_rotation = angle if absolute else (self.current_rotation + angle) % 360
-        rotated = image.rotate(self.current_rotation, expand=True)
-
-        self._render_image(rotated)
+        self._render_image(self._get_edited_image())
     
     def rotate_custom(self):
         """Open a dialog to enter a custom rotation angle, then rotate the image accordingly."""
@@ -322,7 +312,6 @@ class ImageFunctions:
         Button(dialog, text="Rotate", command=apply).pack(pady=5)
     
     def undo(self):
-        """Undo the last transformation applied to the image."""
         if not self.stack_undo:
             self.status_label.config(text="Nothing to undo.")
             return
@@ -330,16 +319,18 @@ class ImageFunctions:
         last_action, value = self.stack_undo.pop()
 
         if last_action == "rotate":
-            self.stack_redo.append((last_action, self.current_rotation))
-            self.rotate_image(value, push_undo=False, absolute=True)
+            self.stack_redo.append(("rotate", self.current_rotation))
+            self.current_rotation = value
             self.status_label.config(text=f"Undid rotation — back to {value}°.")
         elif last_action == "filter":
-            self.stack_redo.append((last_action, self.original_image.copy()))
-            self.original_image = value
-            self._render_image(value)
+            self.stack_redo.append(("filter", self.current_filter))
+            self.current_filter = value
             self.status_label.config(text="Undid filter.")
         else:
             self.status_label.config(text="Unknown action to undo.")
+            return
+
+        self._render_image(self._get_edited_image())
     
     def redo(self):
         """Redo the last undone transformation."""
@@ -350,14 +341,18 @@ class ImageFunctions:
         action, value = self.stack_redo.pop()
         
         if action == "rotate":
-            self.stack_undo.append((action, self.current_rotation))
-            self.rotate_image(value, push_undo=False, absolute=True)
+            self.stack_undo.append(("rotate", self.current_rotation))
+            self.current_rotation = value
             self.status_label.config(text=f"Redid rotation of {value} degrees.")
         elif action == "filter":
-            self.stack_undo.append((action, self.original_image.copy()))
-            self.original_image = value
+            self.stack_undo.append(("filter", self.current_filter))
+            self.current_filter = value
+            self.status_label.config(text="Redid filter.")
+        else:
             self.status_label.config(text="Unknown action to redo.")
+            return
 
+        self._render_image(self._get_edited_image())
 
     def fast_delete_func(self):
         """Toggle fast delete mode — left arrow deletes, right arrow moves."""
@@ -395,13 +390,13 @@ class ImageFunctions:
         """Core sorting logic — moves all images into subfolders based on CLIP labels."""
         folder = os.path.dirname(self.image_files[0])
         count = len(self.image_files)
-        text_tokens = initialize_clip_labels(labels)
+        text_tokens = self.autolabeler.initialize_clip_labels(labels)
 
         for subfolder in set(labels):
             os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
 
         for file in self.image_files:
-            label, _ = get_clip_label(file, labels, text_tokens)
+            label, _ = self.autolabeler.get_clip_label(file, labels, text_tokens)
             labeled_folder = os.path.join(folder, label)
             shutil.move(file, self.unique_dest(labeled_folder, os.path.basename(file)))
 
@@ -415,6 +410,9 @@ class ImageFunctions:
         """Sort images into subfolders based on user-defined CLIP labels."""
         if not self.image_files:
             self.status_label.config(text="No images loaded.")
+            return
+        if not self.labels:
+            self.status_label.config(text="No labels defined. Please add labels with Manage Labels.")
             return
         self._sort_by_clip(self.labels)
 
