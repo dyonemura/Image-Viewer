@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from torchvision import models, transforms
 
 class DuplicateDetectorMain:
+    __slots__ = ("resnet_model", "transform", "device", "embedding_cache", "orb_cache", "_orb")
+    
     def __init__(self):
         self.resnet_model = None
         self.transform = None
@@ -20,6 +22,7 @@ class DuplicateDetectorMain:
         self._orb = cv2.ORB_create(3000)
 
     def _load_resnet(self):
+        """Lazy load ResNet model only when needed for embedding comparisons."""
         if self.resnet_model is not None:
             return
         model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
@@ -33,7 +36,8 @@ class DuplicateDetectorMain:
                                 std=[0.229, 0.224, 0.225])
         ])
 
-    # Helper functions to load images in different formats
+    # --- Load Image Functions -------------------------------------------------------------
+
     def load_pil(self, img):
         """Always returns a PIL image."""
         if isinstance(img, str):
@@ -46,7 +50,8 @@ class DuplicateDetectorMain:
             return cv2.imread(img, cv2.IMREAD_GRAYSCALE)
         return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
-    # Only works for file paths, bytes must be identical
+    # --- Duplicate Detection Functions -------------------------------------------------------
+
     def md5_hash(self, img):
         """Calculate MD5 hash of a file to check for exact file duplicates. No image processing."""
         with open(img, "rb") as f:
@@ -84,8 +89,8 @@ class DuplicateDetectorMain:
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         return len(bf.match(des1, des2))
 
-    # Functions to get ResNet embeddings and compare them with cosine similarity, including rotations and flips to handle edits
     def get_embedding(self, img):
+        """Get ResNet embedding for an image, with caching to speed up repeated comparisons."""
         if isinstance(img, str) and img in self.embedding_cache:
             return self.embedding_cache[img]
         
@@ -119,6 +124,8 @@ class DuplicateDetectorMain:
 
         sims = F.cosine_similarity(emb1.unsqueeze(0), embs)
         return sims.max().item()
+
+    # --- Main Duplicate Check Functions -------------------------------------------------------
 
     def duplicate_check(self, img1, img2,
                         phash_thresh=8,

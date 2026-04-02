@@ -116,6 +116,7 @@ def open_label_manager():
     def on_confirm():
         settings["image_labels"] = curr_labels
         save_settings_json(settings)
+        image_functions.apply_settings(settings)
         win.destroy()
 
     ttk.Button(win, text="Save", command=on_confirm).pack(pady=5)
@@ -185,8 +186,8 @@ image_menu.add_command(label="Information", command=image_functions.get_metadata
 advanced_menu = tk.Menu(menubar, tearoff=0)
 advanced_menu.add_command(label="Sort Duplicates", command=image_functions.check_duplicate)
 advanced_menu.add_separator()
-advanced_menu.add_command(label="Auto Sort From Labels", command=image_functions.auto_sort_images)
-advanced_menu.add_command(label="Auto Sort NSFW", command=image_functions.auto_sort_nsfw)
+advanced_menu.add_command(label="Auto Sort From Labels", command=lambda: image_functions.auto_sort_images(False))
+advanced_menu.add_command(label="Auto Sort NSFW", command=lambda: image_functions.auto_sort_images(True))
 advanced_menu.add_command(label="Manage Labels", command=open_label_manager)
 advanced_menu.add_separator()
 advanced_menu.add_checkbutton(
