@@ -1,8 +1,7 @@
-from fileinput import filename
 import os
 import shutil
 from bisect import bisect_left
-from tkinter import Button, Entry, Label, Toplevel, dialog, filedialog, messagebox
+from tkinter import Button, Entry, Label, Toplevel, filedialog, messagebox
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageTk
 from PIL.ExifTags import TAGS
@@ -15,13 +14,18 @@ from autolabeler import CLIPLabeler
 class ImageFunctions:
     __slots__ = ("root", "image_label", "status_label", "confirm_deletes", "fast_delete", 
                   "labels", "image_files", "current_index", "original_image", "stack_undo", 
-                  "stack_redo", "current_rotation", "current_filter", "duplicate_detector", "autolabeler", "current_crop", "_last_resize_dims")
+                  "stack_redo", "current_rotation", "current_filter", "duplicate_detector", 
+                  "autolabeler", "current_crop", "crop_start", "crop_rect", "_last_resize_dims", 
+                  "_crop_canvas", "_crop_photo", "_crop_scale", "_crop_img_offset", "_crop_drag_corner", "_crop_bounds")
+    
+    _HANDLE_R = 6
 
-    def __init__(self, root, image_label, status_label, settings):
+    def __init__(self, root, image_label, status_label, crop_canvas, settings):
         # UI references
         self.root = root
         self.image_label = image_label
         self.status_label = status_label
+        self._crop_canvas = crop_canvas
         
         # Initialize Previous Settings
         self.apply_settings(settings)
@@ -30,9 +34,12 @@ class ImageFunctions:
         self.image_files = []
         self.current_index = 0
         self.current_rotation = 0
+        self.crop_start = None
+        self.crop_rect = None
         self.current_crop = None
         self.current_filter = None
         self.original_image = None
+        self._crop_bounds = None
 
         # Undo/Redo stacks
         self.stack_redo = []
@@ -373,6 +380,10 @@ class ImageFunctions:
             self.stack_redo.append(("filter", self.current_filter))
             self.current_filter = value
             self.status_label.config(text="Undid filter.")
+        elif last_action == "crop":
+            self.stack_redo.append(("crop", self.current_crop))
+            self.current_crop = value
+            self.status_label.config(text="Undid crop.")
         else:
             self.status_label.config(text="Unknown action to undo.")
             return
@@ -395,6 +406,10 @@ class ImageFunctions:
             self.stack_undo.append(("filter", self.current_filter))
             self.current_filter = value
             self.status_label.config(text="Redid filter.")
+        elif action == "crop":
+            self.stack_undo.append(("crop", self.current_crop))
+            self.current_crop = value
+            self.status_label.config(text="Redid crop.")
         else:
             self.status_label.config(text="Unknown action to redo.")
             return
@@ -477,3 +492,180 @@ class ImageFunctions:
             self.original_image = None
             self.image_label.config(image="")
             self.status_label.config(text=f"Sorted {count} images into {len(labels)} label(s).")
+        
+    # --- Crop Functions -------------------------------------------------------------
+
+    def start_crop_mode(self):
+        """Overlay the crop canvas on the image label and begin listening for drag events."""
+        if not self.image_files or self.original_image is None:
+            self.status_label.config(text="No image loaded.")
+            return
+
+        self.image_label.update_idletasks()
+        x = self.image_label.winfo_x()
+        y = self.image_label.winfo_y()
+        w = self.image_label.winfo_width()
+        h = self.image_label.winfo_height()
+
+        canvas = self._crop_canvas
+        canvas.place(x=x, y=y, width=w, height=h)
+
+        orig_w, orig_h = self.original_image.size
+        scale = min(w / orig_w, h / orig_h)
+        disp_w = int(orig_w * scale)
+        disp_h = int(orig_h * scale)
+
+        display_img = self.original_image.resize((disp_w, disp_h), Image.LANCZOS)
+        self._crop_photo = ImageTk.PhotoImage(display_img)
+        self._crop_scale = (orig_w / disp_w, orig_h / disp_h)
+
+        offset_x = (w - disp_w) // 2
+        offset_y = (h - disp_h) // 2
+        self._crop_img_offset = (offset_x, offset_y)
+        self._crop_bounds = (
+            offset_x,
+            offset_y,
+            offset_x + disp_w,
+            offset_y + disp_h
+        )
+
+        canvas.delete("all")
+        canvas.create_image(offset_x, offset_y, anchor="nw", image=self._crop_photo)
+
+        self.crop_start = None
+        self.crop_rect = None
+        self._crop_drag_corner = None
+
+        canvas.bind("<ButtonPress-1>",   self._crop_press)
+        canvas.bind("<B1-Motion>",       self._crop_drag)
+        canvas.bind("<ButtonRelease-1>", self._crop_release)
+
+        self.status_label.config(text="Drag to select crop region. Press Enter to confirm, Esc to cancel.")
+        self.root.bind("<Return>", lambda _: self.confirm_crop())
+        self.root.bind("<Escape>", lambda _: self.cancel_crop())
+
+    def _crop_corners(self):
+        """Return the four corner (cx, cy) pairs of the current crop rect in canvas coords."""
+        if self.crop_rect is None:
+            return []
+        x1, y1, x2, y2 = self._crop_canvas.coords(self.crop_rect)
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    def _crop_press(self, event):
+        # Check if clicking near an existing corner handle
+        corners = self._crop_corners()
+        for i, (cx, cy) in enumerate(corners):
+            if abs(event.x - cx) <= type(self)._HANDLE_R + 4 and abs(event.y - cy) <= type(self)._HANDLE_R + 4:
+                self._crop_drag_corner = i
+                return
+        # Otherwise start a new rectangle
+        self._crop_drag_corner = None
+        self.crop_start = self._clamp_to_image(event.x, event.y)
+        canvas = self._crop_canvas
+        if self.crop_rect:
+            canvas.delete(self.crop_rect)
+        canvas.delete("handle")
+        self.crop_rect = canvas.create_rectangle(
+            event.x, event.y, event.x, event.y,
+            outline="#00BFFF", width=2, dash=(4, 2)
+        )
+
+    def _crop_drag(self, event):
+        canvas = self._crop_canvas
+
+        x, y = self._clamp_to_image(event.x, event.y)
+
+        if self._crop_drag_corner is not None and self.crop_rect is not None:
+            x1, y1, x2, y2 = canvas.coords(self.crop_rect)
+
+            if self._crop_drag_corner == 0:      # top-left
+                x1, y1 = x, y
+            elif self._crop_drag_corner == 1:    # top-right
+                x2, y1 = x, y
+            elif self._crop_drag_corner == 2:    # bottom-right
+                x2, y2 = x, y
+            elif self._crop_drag_corner == 3:    # bottom-left
+                x1, y2 = x, y
+
+            canvas.coords(self.crop_rect, x1, y1, x2, y2)
+
+        elif self.crop_start:
+            x0, y0 = self.crop_start
+            x0, y0 = self._clamp_to_image(x0, y0)
+            canvas.coords(self.crop_rect, x0, y0, x, y)
+
+        self._draw_handles()
+
+    def _crop_release(self, event):
+        self._crop_drag_corner = None
+        self._draw_handles()
+
+    def _draw_handles(self):
+        """Redraw the four draggable corner squares."""
+        canvas = self._crop_canvas
+        canvas.delete("handle")
+        r = type(self)._HANDLE_R
+        for cx, cy in self._crop_corners():
+            canvas.create_rectangle(
+                cx - r, cy - r, cx + r, cy + r,
+                fill="#00BFFF", outline="white", width=1, tags="handle"
+            )
+
+    def confirm_crop(self):
+        """Map canvas crop rect back to image coordinates and store as current_crop."""
+        if self.crop_rect is None:
+            self.cancel_crop()
+            return
+
+        x1, y1, x2, y2 = self._crop_canvas.coords(self.crop_rect)
+        # Ensure x1 < x2, y1 < y2
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+
+        # Subtract the image offset (letterbox padding) then scale to image coords
+        ox, oy = self._crop_img_offset
+        sx, sy = self._crop_scale
+        img_x1 = int((x1 - ox) * sx)
+        img_y1 = int((y1 - oy) * sy)
+        img_x2 = int((x2 - ox) * sx)
+        img_y2 = int((y2 - oy) * sy)
+
+        orig_w, orig_h = self.original_image.size
+        img_x1 = max(0, img_x1)
+        img_y1 = max(0, img_y1)
+        img_x2 = min(orig_w, img_x2)
+        img_y2 = min(orig_h, img_y2)
+
+        if img_x2 - img_x1 < 2 or img_y2 - img_y1 < 2:
+            self.status_label.config(text="Crop region too small — cancelled.")
+            self.cancel_crop()
+            return
+
+        self.stack_undo.append(("crop", self.current_crop))
+        self.stack_redo.clear()
+        self.current_crop = (img_x1, img_y1, img_x2, img_y2)
+        self._teardown_crop()
+        self._render_image(self._get_edited_image())
+        self.status_label.config(text=f"Cropped to {img_x2 - img_x1}×{img_y2 - img_y1}.")
+
+    def cancel_crop(self):
+        self._teardown_crop()
+        self.status_label.config(text="Crop cancelled.")
+
+    def _teardown_crop(self):
+        canvas = self._crop_canvas
+        canvas.unbind("<ButtonPress-1>")
+        canvas.unbind("<B1-Motion>")
+        canvas.unbind("<ButtonRelease-1>")
+        canvas.place_forget()
+        self.root.unbind("<Return>")
+        self.root.unbind("<Escape>")
+        self.crop_rect = None
+        self.crop_start = None
+
+    def _clamp_to_image(self, x, y):
+        left, top, right, bottom = self._crop_bounds
+        return (
+            max(left, min(x, right)),
+            max(top, min(y, bottom))
+        )

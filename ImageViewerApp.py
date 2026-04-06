@@ -3,14 +3,16 @@ from handlers import ImageFunctions
 from settings_manager import load_settings, save_settings_json
 from tkinter import ttk
 
-# Root Window
+# --- Root Window -------------------------------------------------------------
+
 root = tk.Tk()
 root.title("Simple Image Viewer")
 root.rowconfigure(0, weight=1)   # image row expands
 root.rowconfigure(1, weight=0)   # buttons row stays fixed
 root.columnconfigure(0, weight=1)
 
-# Widgets
+# --- Widgets -------------------------------------------------------------------
+
 image_label = tk.Label(root)
 image_label.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
 
@@ -20,9 +22,11 @@ status_label.grid(row=1, column=0, sticky="ew")
 nav_frame = tk.Frame(root)
 nav_frame.grid(row=2, column=0, pady=5)
 
+crop_canvas = tk.Canvas(root, highlightthickness=0, cursor="crosshair")
+
 # Initializers
 settings = load_settings()
-image_functions = ImageFunctions(root, image_label, status_label, settings)
+image_functions = ImageFunctions(root, image_label, status_label, crop_canvas, settings)
 image_functions.fast_delete_func()  # Apply initial fast delete setting to check if previously enabled
 root.geometry(f'{settings["window_width"]}x{settings["window_height"]}+{settings["window_x"]}+{settings["window_y"]}') # Restores Window Geometry
 
@@ -163,6 +167,8 @@ file_menu.add_command(label="Exit", command=root.quit)
 edit_menu = tk.Menu(menubar, tearoff=0)
 edit_menu.add_command(label="Undo", command=image_functions.undo)
 edit_menu.add_command(label="Redo", command=image_functions.redo)
+edit_menu.add_separator()
+edit_menu.add_command(label="Crop Image", command=image_functions.start_crop_mode)
 edit_menu.add_separator()
 edit_menu.add_command(label="Rotate Image", command=image_functions.rotate_custom)
 
