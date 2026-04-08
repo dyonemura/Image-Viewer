@@ -213,6 +213,8 @@ menubar.add_cascade(label="Image", menu=image_menu)
 menubar.add_cascade(label="Advanced", menu=advanced_menu)
 menubar.add_cascade(label="Help", menu=help_menu)
 
+tk.Button(nav_frame, text="Mass Delete", command=image_functions.open_mass_delete).pack(side="left")
+
 root.config(menu=menubar)
 root.bind("<Configure>", image_functions.resize_image)
 root.protocol("WM_DELETE_WINDOW", on_close)

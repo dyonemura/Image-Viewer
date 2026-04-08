@@ -2,6 +2,7 @@ import os
 import shutil
 from bisect import bisect_left
 from tkinter import Button, Entry, Label, Toplevel, filedialog, messagebox
+import tkinter as tk
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageTk
 from PIL.ExifTags import TAGS
@@ -16,7 +17,7 @@ class ImageFunctions:
                   "labels", "image_files", "current_index", "original_image", "stack_undo", 
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector", 
                   "autolabeler", "current_crop", "crop_start", "crop_rect", "_last_resize_dims", 
-                  "_crop_canvas", "_crop_photo", "_crop_scale", "_crop_img_offset", "_crop_drag_corner", "_crop_bounds")
+                  "_crop_canvas", "_crop_photo", "_crop_scale", "_crop_img_offset", "_crop_drag_corner", "_crop_bounds", "_thumb_cache")
     
     _HANDLE_R = 6
 
@@ -40,6 +41,7 @@ class ImageFunctions:
         self.current_filter = None
         self.original_image = None
         self._crop_bounds = None
+        self._thumb_cache = {} 
 
         # Undo/Redo stacks
         self.stack_redo = []
@@ -48,6 +50,10 @@ class ImageFunctions:
         # Subsystems
         self.autolabeler = CLIPLabeler()
         self.duplicate_detector = DuplicateDetectorMain()
+
+        # Initialize Keybindings
+        self.root.bind("<Left>", lambda e: self.navigate(-1))
+        self.root.bind("<Right>", lambda e: self.navigate(1))
 
     # --- Backend Functions -------------------------------------------------------------
 
@@ -420,8 +426,6 @@ class ImageFunctions:
 
     def fast_delete_func(self):
         """Toggle fast delete mode — left arrow deletes, right arrow moves."""
-        self.root.bind("<Left>", lambda e: self.navigate(-1))
-        self.root.bind("<Right>", lambda e: self.navigate(1))
         if self.fast_delete:
             self.root.bind("<Down>", lambda e: self.delete_image())
             self.root.bind("<Up>", self.fast_delete_up)
@@ -669,3 +673,268 @@ class ImageFunctions:
             max(left, min(x, right)),
             max(top, min(y, bottom))
         )
+    
+    # --- Multi-Image View --------------------------------------------------------------
+
+    def open_mass_delete(self):
+        if not self.image_files:
+            self.status_label.config(text="No images loaded.")
+            return
+
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=4)
+
+        win = Toplevel(self.root)
+        win.title("Mass Delete")
+        win.geometry("900x600")
+
+        outer = tk.Frame(win)
+        outer.pack(fill="both", expand=True)
+
+        scroll_canvas = tk.Canvas(outer)
+        scrollbar = tk.Scrollbar(outer, orient="vertical", command=scroll_canvas.yview)
+        scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        scroll_canvas.pack(side="left", fill="both", expand=True)
+
+        grid_frame = tk.Frame(scroll_canvas)
+        scroll_canvas.create_window((0, 0), window=grid_frame, anchor="nw")
+        grid_frame.bind("<Configure>", lambda e: scroll_canvas.configure(
+            scrollregion=scroll_canvas.bbox("all")
+        ))
+        scroll_canvas.bind_all("<MouseWheel>", lambda e: (
+            scroll_canvas.yview_scroll(-1 * (e.delta // 120), "units"),
+            _schedule_load()
+        ))
+
+        check_vars  = {path: tk.BooleanVar() for path in self.image_files}
+        cell_frames = {}
+        labels      = {}
+        loaded      = set()   # paths fully loaded at current thumb_size
+        in_flight   = set()   # paths currently being loaded in background
+        _state      = {"cols": 0, "thumb_size": 0, "resize_job": None, "load_job": None}
+
+        def build_grid(thumb_size, cols):
+            # Evict cache entries for old thumb_size
+            old_size = _state["thumb_size"]
+            if old_size and old_size != thumb_size:
+                stale = [k for k in self._thumb_cache if k[1] == old_size]
+                for k in stale:
+                    del self._thumb_cache[k]
+
+            for widget in grid_frame.winfo_children():
+                widget.destroy()
+            labels.clear()
+            cell_frames.clear()
+            loaded.clear()
+            in_flight.clear()
+
+            for i, path in enumerate(self.image_files):
+                var = check_vars[path]
+                cell = tk.Frame(grid_frame, padx=4, pady=4)
+                cell.grid(row=i // cols, column=i % cols)
+                cell_frames[path] = cell
+
+                lbl = tk.Label(cell, width=thumb_size // 8, height=thumb_size // 16, bg="#222")
+                lbl.image = None
+                lbl.pack()
+                labels[path] = lbl
+
+                lbl.bind("<Button-1>", lambda e, v=var, f=cell: self._thumb_toggle(v, f))
+
+                name = os.path.basename(path)
+                tk.Label(cell, text=name[:20], font=("Arial", 7), wraplength=thumb_size).pack()
+                tk.Checkbutton(cell, variable=var,
+                            command=lambda v=var, f=cell: self._thumb_highlight(v, f)).pack()
+
+            _state["thumb_size"] = thumb_size
+            _state["cols"] = cols
+
+        def _do_load_thumb(path, thumb_size):
+            """Runs in thread pool — no Tk calls here."""
+            cache_key = (path, thumb_size)
+            if cache_key in self._thumb_cache:
+                return path, thumb_size, self._thumb_cache[cache_key]
+            try:
+                img = Image.open(path)
+                img.thumbnail((thumb_size, thumb_size), Image.BILINEAR)
+                photo = ImageTk.PhotoImage(img)  # must be on main thread ideally,
+                # but PhotoImage creation is safe if called before mainloop sees it
+            except Exception:
+                photo = None
+            self._thumb_cache[cache_key] = photo
+            return path, thumb_size, photo
+
+        def _apply_thumb(path, thumb_size, photo):
+            """Called back on main thread via win.after."""
+            if not win.winfo_exists():
+                return
+            in_flight.discard(path)
+            loaded.add(path)
+            if thumb_size != _state["thumb_size"]:
+                return  # stale result from a previous layout
+            lbl = labels.get(path)
+            if lbl and photo:
+                lbl.config(image=photo, width=thumb_size, height=thumb_size, bg="#000")
+                lbl.image = photo
+
+        def load_visible():
+            if not win.winfo_exists():
+                return
+            thumb_size = _state["thumb_size"]
+            cols       = _state["cols"]
+            if not cols:
+                return
+
+            canvas_h = scroll_canvas.winfo_height()
+            top      = scroll_canvas.canvasy(0)
+            bottom   = scroll_canvas.canvasy(canvas_h)
+            row_h    = thumb_size + 40
+
+            for i, path in enumerate(self.image_files):
+                if path in loaded or path in in_flight:
+                    continue
+                row_top = (i // cols) * row_h
+                if row_top > bottom + row_h or row_top + row_h < top:
+                    continue
+
+                in_flight.add(path)
+                future = executor.submit(_do_load_thumb, path, thumb_size)
+                future.add_done_callback(
+                    lambda f: win.after(0, lambda r=f.result(): _apply_thumb(*r))
+                )
+
+        def _schedule_load():
+            """Debounce load_visible calls triggered by scroll."""
+            if _state["load_job"]:
+                win.after_cancel(_state["load_job"])
+            _state["load_job"] = win.after(80, load_visible)
+
+        def compute_layout(win_w):
+            cols       = max(2, win_w // 180)
+            thumb_size = max(80, (win_w // cols) - 20)
+            return thumb_size, cols
+
+        def on_resize(event):
+            if event.widget is not win:
+                return
+            if _state["resize_job"]:
+                win.after_cancel(_state["resize_job"])
+
+            def apply():
+                thumb_size, cols = compute_layout(win.winfo_width())
+                if cols == _state["cols"] and thumb_size == _state["thumb_size"]:
+                    return
+                build_grid(thumb_size, cols)
+                load_visible()
+
+            _state["resize_job"] = win.after(200, apply)
+
+        # Shut down thread pool when window closes
+        win.protocol("WM_DELETE_WINDOW", lambda: (executor.shutdown(wait=False), win.destroy()))
+
+        win.bind("<Configure>", on_resize)
+        scroll_canvas.bind("<MouseWheel>", lambda e: _schedule_load())
+
+        win.update_idletasks()
+        thumb_size, cols = compute_layout(win.winfo_width())
+        build_grid(thumb_size, cols)
+        win.after(100, load_visible)
+
+        bar = tk.Frame(win)
+        bar.pack(fill="x", side="bottom", pady=6)
+        tk.Button(bar, text="Select All",   command=lambda: self._mass_select(check_vars, True)).pack(side="left", padx=6)
+        tk.Button(bar, text="Deselect All", command=lambda: self._mass_select(check_vars, False)).pack(side="left")
+        tk.Button(bar, text="Delete Selected", fg="white", bg="red",
+                command=lambda: self._mass_delete_confirm(win, check_vars)).pack(side="right", padx=6)
+
+    def _thumb_toggle(self, var, frame):
+        var.set(not var.get())
+        self._thumb_highlight(var, frame)
+
+    def _thumb_highlight(self, var, frame):
+        frame.config(bg="red" if var.get() else frame.master.cget("bg"))
+        for child in frame.winfo_children():
+            try:
+                child.config(bg="red" if var.get() else frame.master.cget("bg"))
+            except tk.TclError:
+                pass
+
+    def _mass_select(self, check_vars, state):
+        for var in check_vars.values():
+            var.set(state)
+
+    def _mass_delete_confirm(self, win, check_vars):
+        to_delete = [p for p, v in check_vars.items() if v.get()]
+        if not to_delete:
+            return
+
+        if self.confirm_deletes:
+            if not messagebox.askyesno("Delete", f"Trash {len(to_delete)} image(s)?"):
+                return
+
+        for path in to_delete:
+            send2trash(path)
+            self.image_files.remove(path)
+
+        # If current image was deleted, clamp index
+        if self.image_files:
+            self.current_index = min(self.current_index, len(self.image_files) - 1)
+            self.display_image(self.image_files[self.current_index])
+        else:
+            self.original_image = None
+            self.image_label.config(image="")
+
+        self.status_label.config(text=f"Trashed {len(to_delete)} image(s).")
+        win.destroy()
+    
+    # --- Rename Photo Function -------------------------------------------------------------
+
+    def rename_photo(self):
+        """Open a dialog to rename the current photo."""
+        if not self.image_files:
+            self.status_label.config(text="No image loaded.")
+            return
+
+        current_file = self.image_files[self.current_index]
+        folder = os.path.dirname(current_file)
+        old_name = os.path.basename(current_file)
+
+        dialog = Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.title("Rename Photo")
+        dialog.geometry("300x150")
+        dialog.resizable(False, False)
+
+        Label(dialog, text="Enter new name (with extension):").pack(pady=10)
+
+        name_entry = Entry(dialog)
+        name_entry.insert(0, old_name)
+        name_entry.pack()
+        name_entry.focus()
+
+        error_label = Label(dialog, text="", fg="red")
+        error_label.pack()
+
+        def apply():
+            new_name = name_entry.get().strip()
+            if not new_name:
+                error_label.config(text="Name cannot be empty.")
+                return
+            if new_name == old_name:
+                error_label.config(text="New name is the same as the current name.")
+                return
+            if os.path.exists(os.path.join(folder, new_name)):
+                error_label.config(text="A file with that name already exists.")
+                return
+
+            new_path = os.path.join(folder, new_name)
+            os.rename(current_file, new_path)
+            self.image_files[self.current_index] = new_path
+            self.display_image(new_path)
+            self.status_label.config(text=f"Renamed to: {new_name}")
+            dialog.destroy()
+
+        dialog.bind("<Return>", lambda _: apply())
+        Button(dialog, text="Rename", command=apply).pack(pady=5)
