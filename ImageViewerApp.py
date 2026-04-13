@@ -1,14 +1,15 @@
 import tkinter as tk
+from tkinter import ttk
+
 from handlers import ImageFunctions
 from settings_manager import load_settings, save_settings_json
-from tkinter import ttk
 
 # --- Root Window -------------------------------------------------------------
 
 root = tk.Tk()
 root.title("Simple Image Viewer")
-root.rowconfigure(0, weight=1)   # image row expands
-root.rowconfigure(1, weight=0)   # buttons row stays fixed
+root.rowconfigure(0, weight=1)  # image row expands
+root.rowconfigure(1, weight=0)  # buttons row stays fixed
 root.columnconfigure(0, weight=1)
 
 # --- Widgets -------------------------------------------------------------------
@@ -22,18 +23,18 @@ status_label.grid(row=1, column=0, sticky="ew")
 nav_frame = tk.Frame(root)
 nav_frame.grid(row=2, column=0, pady=5)
 
-crop_canvas = tk.Canvas(root, highlightthickness=0, cursor="crosshair")
-
 # Initializers
 settings = load_settings()
-image_functions = ImageFunctions(root, image_label, status_label, crop_canvas, settings)
+image_functions = ImageFunctions(root, image_label, status_label, settings)
 image_functions.fast_delete_func()  # Apply initial fast delete setting to check if previously enabled
-root.geometry(f'{settings["window_width"]}x{settings["window_height"]}+{settings["window_x"]}+{settings["window_y"]}') # Restores Window Geometry
+root.geometry(
+    f'{settings["window_width"]}x{settings["window_height"]}+{settings["window_x"]}+{settings["window_y"]}')  # Restores Window Geometry
 
 # Buttons
 tk.Button(nav_frame, text="← Back", command=lambda: image_functions.navigate(-1)).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Next →", command=lambda: image_functions.navigate(1)).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Delete Image", command=image_functions.delete_image).pack(side=tk.LEFT, padx=10)
+
 
 # Settings Menu
 def open_settings_menu():
@@ -47,7 +48,7 @@ def open_settings_menu():
     def on_toggle_confirm_delete():
         settings["confirm_deletes"] = confirm_delete_var.get()
         image_functions.confirm_deletes = settings["confirm_deletes"]
-    
+
     ttk.Label(settings_win, text="Delete Settings", font=("", 10, "bold")).pack(pady=(10, 0))
     ttk.Label(settings_win, text="Show a confirmation prompt before deleting images.").pack()
     ttk.Checkbutton(
@@ -64,6 +65,7 @@ def open_settings_menu():
 
     save_btn = ttk.Button(settings_win, text="Save", command=save_settings)
     save_btn.pack(pady=20)
+
 
 # Label Func
 def open_label_manager():
@@ -105,7 +107,7 @@ def open_label_manager():
             index = selected[0]
             curr_labels.pop(index)
             listbox.delete(index)
-    
+
     def remove_all():
         curr_labels.clear()
         listbox.delete(0, tk.END)
@@ -125,6 +127,7 @@ def open_label_manager():
 
     ttk.Button(win, text="Save", command=on_confirm).pack(pady=5)
 
+
 # Closing Func
 def on_close():
     geom = root.geometry()
@@ -141,14 +144,17 @@ def on_close():
     save_settings_json(settings)
     root.destroy()
 
+
 # Fast Delete
 fast_delete_var = tk.BooleanVar(value=settings["fast_delete"])
+
 
 def on_toggle_fast_delete():
     settings["fast_delete"] = fast_delete_var.get()
     image_functions.fast_delete = settings["fast_delete"]
     image_functions.fast_delete_func()
     save_settings_json(settings)
+
 
 # Menu Bar
 menubar = tk.Menu(root)
@@ -184,11 +190,12 @@ for label, mode in [
 ]:
     filter_menu.add_command(label=label, command=lambda m=mode: image_functions.apply_filter(m))
 
-# Image Menu
+# --- Image Menu ------------------------------------------------------------
 image_menu = tk.Menu(menubar, tearoff=0)
 image_menu.add_command(label="Information", command=image_functions.get_metadata)
+image_menu.add_command(label="Rename Image", command=image_functions.rename_photo)
 
-# Advanced Menu
+# --- Advanced Menu ---------------------------------------------------------
 advanced_menu = tk.Menu(menubar, tearoff=0)
 advanced_menu.add_command(label="Sort Duplicates", command=image_functions.check_duplicate)
 advanced_menu.add_separator()
@@ -205,7 +212,7 @@ advanced_menu.add_checkbutton(
 # Help Menu
 help_menu = tk.Menu(menubar, tearoff=0)
 
-#Menu Bard Cascades
+# Menu Bard Cascades
 menubar.add_cascade(label="File", menu=file_menu)
 menubar.add_cascade(label="Edit", menu=edit_menu)
 menubar.add_cascade(label="Filters", menu=filter_menu)
