@@ -12,7 +12,7 @@ root.rowconfigure(0, weight=1)  # image row expands
 root.rowconfigure(1, weight=0)  # buttons row stays fixed
 root.columnconfigure(0, weight=1)
 
-# --- Widgets -------------------------------------------------------------------
+# --- Widgets -----------------------------------------------------------------
 
 image_label = tk.Label(root)
 image_label.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
@@ -23,20 +23,22 @@ status_label.grid(row=1, column=0, sticky="ew")
 nav_frame = tk.Frame(root)
 nav_frame.grid(row=2, column=0, pady=5)
 
-# Initializers
+# --- Initializers ------------------------------------------------------------
+
 settings = load_settings()
 image_functions = ImageFunctions(root, image_label, status_label, settings)
-image_functions.fast_delete_func()  # Apply initial fast delete setting to check if previously enabled
 root.geometry(
     f'{settings["window_width"]}x{settings["window_height"]}+{settings["window_x"]}+{settings["window_y"]}')  # Restores Window Geometry
 
-# Buttons
+# --- Buttons -----------------------------------------------------------------
+
 tk.Button(nav_frame, text="← Back", command=lambda: image_functions.navigate(-1)).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Next →", command=lambda: image_functions.navigate(1)).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Delete Image", command=image_functions.delete_image).pack(side=tk.LEFT, padx=10)
+tk.Button(nav_frame, text="Mass Delete", command=image_functions.open_mass_delete).pack(side="left")
 
+# --- Settings Menu -----------------------------------------------------------
 
-# Settings Menu
 def open_settings_menu():
     settings_win = tk.Toplevel(root)
     settings_win.title("Settings")
@@ -66,50 +68,48 @@ def open_settings_menu():
     save_btn = ttk.Button(settings_win, text="Save", command=save_settings)
     save_btn.pack(pady=20)
 
+# --- Label Manager --------------------------------------------------------------
 
-# Label Func
 def open_label_manager():
     win = tk.Toplevel(root)
     win.title("Label Manager")
     win.geometry("300x400")
     win.grab_set()
 
-    curr_labels = list(settings.get("image_labels", []))
-
     # --- Input Row ---
     entry_var = tk.StringVar()
-    entry_frame = tk.Frame(win)
+    entry_frame = ttk.Frame(win)
     entry_frame.pack(pady=10, padx=10, fill="x")
 
     entry = ttk.Entry(entry_frame, textvariable=entry_var)
-    entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(0, 5))
-
-    def add_label():
-        text = entry_var.get().strip()
-        if text and text not in curr_labels:
-            curr_labels.append(text)
-            listbox.insert(tk.END, text)
-            entry_var.set("")
-
-    entry.bind("<Return>", lambda e: add_label())
-    ttk.Button(entry_frame, text="Add", command=add_label).pack(side=tk.LEFT)
+    entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
     # --- Listbox ---
     listbox = tk.Listbox(win, selectmode=tk.SINGLE)
     listbox.pack(fill="both", expand=True, padx=10)
 
-    for i in curr_labels:
-        listbox.insert(tk.END, i)
+    # Load existing labels directly into listbox
+    for label in settings.get("image_labels", []):
+        listbox.insert(tk.END, label)
+
+    # --- Actions ---
+    def add_label(*_):
+        text = entry_var.get().strip()
+        if not text:
+            return
+        if text not in listbox.get(0, tk.END):
+            listbox.insert(tk.END, text)
+        entry_var.set("")
+
+    entry.bind("<Return>", add_label)
+    ttk.Button(entry_frame, text="Add", command=add_label).pack(side="left")
 
     def remove_label():
-        selected = listbox.curselection()
-        if selected:
-            index = selected[0]
-            curr_labels.pop(index)
-            listbox.delete(index)
+        sel = listbox.curselection()
+        if sel:
+            listbox.delete(sel[0])
 
     def remove_all():
-        curr_labels.clear()
         listbox.delete(0, tk.END)
 
     btn_frame = ttk.Frame(win)
@@ -118,18 +118,19 @@ def open_label_manager():
     ttk.Button(btn_frame, text="Remove Selected", command=remove_label).pack(side="left", padx=5)
     ttk.Button(btn_frame, text="Remove All", command=remove_all).pack(side="left", padx=5)
 
-    # --- Confirm ---
+    # --- Save ---
     def on_confirm():
-        settings["image_labels"] = curr_labels
+        settings["image_labels"] = list(listbox.get(0, tk.END))
         save_settings_json(settings)
         image_functions.apply_settings(settings)
         win.destroy()
 
     ttk.Button(win, text="Save", command=on_confirm).pack(pady=5)
 
+# --- Closing Func ------------------------------------------------------------
 
-# Closing Func
 def on_close():
+    """Save window geometry and settings before closing."""
     geom = root.geometry()
 
     # Parse it
@@ -144,22 +145,21 @@ def on_close():
     save_settings_json(settings)
     root.destroy()
 
+# --- Fast Delete Toggle ------------------------------------------------------
 
-# Fast Delete
 fast_delete_var = tk.BooleanVar(value=settings["fast_delete"])
-
 
 def on_toggle_fast_delete():
     settings["fast_delete"] = fast_delete_var.get()
-    image_functions.fast_delete = settings["fast_delete"]
-    image_functions.fast_delete_func()
     save_settings_json(settings)
+    image_functions.apply_settings(settings)
 
+# --- Menu Bar ----------------------------------------------------------------
 
-# Menu Bar
 menubar = tk.Menu(root)
 
-# File Menu
+# --- File Menu ---------------------------------------------------------------
+
 file_menu = tk.Menu(menubar, tearoff=0)
 file_menu.add_command(label="Open Image", command=image_functions.open_image)
 file_menu.add_separator()
@@ -169,7 +169,8 @@ file_menu.add_command(label="Settings", command=open_settings_menu)
 file_menu.add_separator()
 file_menu.add_command(label="Exit", command=root.quit)
 
-# Edit Menu
+# --- Edit Menu --------------------------------------------------------------
+
 edit_menu = tk.Menu(menubar, tearoff=0)
 edit_menu.add_command(label="Undo", command=image_functions.undo)
 edit_menu.add_command(label="Redo", command=image_functions.redo)
@@ -178,7 +179,8 @@ edit_menu.add_command(label="Crop Image", command=image_functions.start_crop_mod
 edit_menu.add_separator()
 edit_menu.add_command(label="Rotate Image", command=image_functions.rotate_custom)
 
-# Filter Menu
+# --- Filter Menu -----------------------------------------------------------
+
 filter_menu = tk.Menu(menubar, tearoff=0)
 for label, mode in [
     ("Grayscale", "grayscale"),
@@ -191,11 +193,13 @@ for label, mode in [
     filter_menu.add_command(label=label, command=lambda m=mode: image_functions.apply_filter(m))
 
 # --- Image Menu ------------------------------------------------------------
+
 image_menu = tk.Menu(menubar, tearoff=0)
 image_menu.add_command(label="Information", command=image_functions.get_metadata)
 image_menu.add_command(label="Rename Image", command=image_functions.rename_photo)
 
 # --- Advanced Menu ---------------------------------------------------------
+
 advanced_menu = tk.Menu(menubar, tearoff=0)
 advanced_menu.add_command(label="Sort Duplicates", command=image_functions.check_duplicate)
 advanced_menu.add_separator()
@@ -209,10 +213,12 @@ advanced_menu.add_checkbutton(
     command=on_toggle_fast_delete
 )
 
-# Help Menu
+# --- Help Menu ------------------------------------------------------------
+
 help_menu = tk.Menu(menubar, tearoff=0)
 
-# Menu Bard Cascades
+# --- Menu Bar Cascades ----------------------------------------------------
+
 menubar.add_cascade(label="File", menu=file_menu)
 menubar.add_cascade(label="Edit", menu=edit_menu)
 menubar.add_cascade(label="Filters", menu=filter_menu)
@@ -220,7 +226,7 @@ menubar.add_cascade(label="Image", menu=image_menu)
 menubar.add_cascade(label="Advanced", menu=advanced_menu)
 menubar.add_cascade(label="Help", menu=help_menu)
 
-tk.Button(nav_frame, text="Mass Delete", command=image_functions.open_mass_delete).pack(side="left")
+# --- Finalize ----------------------------------------------------------------
 
 root.config(menu=menubar)
 root.bind("<Configure>", image_functions.resize_image)

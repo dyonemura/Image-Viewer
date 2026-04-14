@@ -67,6 +67,9 @@ class ImageFunctions:
         self.fast_delete = settings.get("fast_delete", False)
         self.labels = settings.get("image_labels", [])
 
+        # Apply fast delete behavior immediately
+        self.fast_delete_func()
+
     def load_folder(self, file_path):
         """Load all images in the same folder as the selected image, using bisect for efficient indexing."""
         file_path = os.path.normpath(file_path)
@@ -163,7 +166,7 @@ class ImageFunctions:
     def get_metadata(self):
         """Extract metadata including EXIF (creation date, camera info, bit depth)."""
         if not self.image_files:
-            messagebox.showinfo("Metadata", "No image loaded.")
+            messagebox.showinfo("Image Metadata", "No image loaded.")
             return
 
         file_path = self.image_files[self.current_index]
@@ -194,7 +197,7 @@ class ImageFunctions:
                     elif tag == "Model":
                         camera_model = value
 
-            messagebox.showinfo("Metadata", (
+            messagebox.showinfo("Image Metadata", (
                 f"Dimensions: {width} x {height}\n"
                 f"File Size: {file_size}\n"
                 f"Created: {human}\n"
@@ -204,7 +207,7 @@ class ImageFunctions:
             ))
 
         except Exception:
-            messagebox.showinfo("Metadata", "Metadata unavailable.")
+            messagebox.showinfo("Image Metadata", "Metadata unavailable.")
 
     # --- Displaying Images -------------------------------------------------------------
 
