@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 
+
+#from handlers import ImageFunctions
 from handlers import ImageFunctions
 from settings_manager import load_settings, save_settings_json
 
@@ -14,8 +16,11 @@ root.columnconfigure(0, weight=1)
 
 # --- Widgets -----------------------------------------------------------------
 
-image_label = tk.Label(root)
-image_label.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+#image_label = tk.Label(root)
+#image_label.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+
+image_canvas = tk.Canvas(root, bg=root.cget("bg"), highlightthickness=0, bd=0)
+image_canvas.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
 
 status_label = tk.Label(root, text="", padx=20, pady=10)
 status_label.grid(row=1, column=0, sticky="ew")
@@ -23,10 +28,15 @@ status_label.grid(row=1, column=0, sticky="ew")
 nav_frame = tk.Frame(root)
 nav_frame.grid(row=2, column=0, pady=5)
 
+bottom_bar = tk.Frame(root)
+bottom_bar.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
+
 # --- Initializers ------------------------------------------------------------
 
 settings = load_settings()
-image_functions = ImageFunctions(root, image_label, status_label, settings)
+zoom_label = tk.Label(bottom_bar, text="100%", width=6)
+
+image_functions = ImageFunctions(root, image_canvas, status_label, settings, zoom_label)
 root.geometry(
     f'{settings["window_width"]}x{settings["window_height"]}+{settings["window_x"]}+{settings["window_y"]}')  # Restores Window Geometry
 
@@ -36,6 +46,31 @@ tk.Button(nav_frame, text="← Back", command=lambda: image_functions.navigate(-
 tk.Button(nav_frame, text="Next →", command=lambda: image_functions.navigate(1)).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Delete Image", command=image_functions.delete_image).pack(side=tk.LEFT, padx=10)
 tk.Button(nav_frame, text="Mass Delete", command=image_functions.open_mass_delete).pack(side="left")
+
+# --- Bottom Bar Buttons ------------------------------------------------------
+
+tk.Button(bottom_bar, text="−", width=2,
+          command=lambda: image_functions.set_zoom(image_functions._zoom_raw / 1.1)).pack(side="left")
+
+tk.Button(bottom_bar, text="+", width=2,
+          command=lambda: image_functions.set_zoom(image_functions._zoom_raw * 1.1)).pack(side="left")
+
+# Reset button
+tk.Button(bottom_bar, text="Reset", command=lambda:  image_functions.set_zoom_percent(100)).pack(side="left", padx=4)
+
+zoom_slider = tk.Scale(
+    bottom_bar,
+    from_=10, to=800,
+    resolution=1,
+    orient="horizontal", length=200, showvalue=False,
+    command=lambda val: image_functions.set_zoom_percent(float(val))
+)
+
+image_functions._zoom_slider = zoom_slider
+
+zoom_slider.pack(side="left", padx=4)
+zoom_label.pack(side="left", padx=4)
+
 
 # --- Settings Menu -----------------------------------------------------------
 
@@ -133,15 +168,18 @@ def on_close():
     """Save window geometry and settings before closing."""
     geom = root.geometry()
 
-    # Parse it
-    size, pos = geom.split("+", 1)
-    width, height = size.split("x")
-    x, y = pos.split("+")
+    # Example: "800x600+100+100"
+    w_h, x_y = geom.split("+", 1)
+    width, height = map(int, w_h.split("x"))
+    x, y = map(int, x_y.split("+"))
 
-    settings["window_width"] = int(width)
-    settings["window_height"] = int(height)
-    settings["window_x"] = int(x)
-    settings["window_y"] = int(y)
+    settings.update({
+        "window_width": width,
+        "window_height": height,
+        "window_x": x,
+        "window_y": y,
+    })
+
     save_settings_json(settings)
     root.destroy()
 
@@ -163,6 +201,7 @@ menubar = tk.Menu(root)
 file_menu = tk.Menu(menubar, tearoff=0)
 file_menu.add_command(label="Open Image", command=image_functions.open_image)
 file_menu.add_separator()
+file_menu.add_command(label="Save", command=image_functions.save_image_overwrite)
 file_menu.add_command(label="Save As", command=image_functions.save_image)
 file_menu.add_separator()
 file_menu.add_command(label="Settings", command=open_settings_menu)
@@ -182,14 +221,10 @@ edit_menu.add_command(label="Rotate Image", command=image_functions.rotate_custo
 # --- Filter Menu -----------------------------------------------------------
 
 filter_menu = tk.Menu(menubar, tearoff=0)
-for label, mode in [
-    ("Grayscale", "grayscale"),
-    ("Blur", "blur"),
-    ("Sharpen", "sharpen"),
-    ("Brightness", "brightness"),
-    ("Contour", "contour"),
-    ("Reset", "reset"),
-]:
+
+filter_lst = [("Grayscale", "grayscale"), ("Blur", "blur"), ("Sharpen", "sharpen"), ("Brightness", "brightness"), ("Contour", "contour"), ("Reset", "reset")]
+
+for label, mode in filter_lst:
     filter_menu.add_command(label=label, command=lambda m=mode: image_functions.apply_filter(m))
 
 # --- Image Menu ------------------------------------------------------------
@@ -197,6 +232,7 @@ for label, mode in [
 image_menu = tk.Menu(menubar, tearoff=0)
 image_menu.add_command(label="Information", command=image_functions.get_metadata)
 image_menu.add_command(label="Rename Image", command=image_functions.rename_photo)
+
 
 # --- Advanced Menu ---------------------------------------------------------
 

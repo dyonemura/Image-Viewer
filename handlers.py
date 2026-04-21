@@ -16,15 +16,16 @@ from MassDeleteDialog import MassDeleteDialog
 
 
 class ImageFunctions:
-    __slots__ = ("root", "image_label", "status_label", "confirm_deletes", "fast_delete",
+    __slots__ = ("root", "image_canvas", "status_label", "confirm_deletes", "fast_delete",
                   "labels", "image_files", "current_index", "original_image", "stack_undo",
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector",
-                  "autolabeler", "current_crop", "_last_resize_dims","_crop_overlay", "_thumb_cache")
+                  "autolabeler", "current_crop", "_last_resize_dims","_crop_overlay", "_thumb_cache",
+                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_var", "zoom_slider", "drag_start")
 
-    def __init__(self, root, image_label, status_label, settings):
+    def __init__(self, root, image_canvas, status_label, settings, zoom_label=None):
         # UI references
         self.root = root
-        self.image_label = image_label
+        self.image_canvas = image_canvas
         self.status_label = status_label
 
         # Initialize Previous Settings
@@ -48,9 +49,9 @@ class ImageFunctions:
         self.autolabeler = None
         self.duplicate_detector = None
         self._crop_overlay = CropOverlay(
-            parent=self.image_label.master,
+            parent=self.image_canvas.master,
             root=self.root,
-            image_label=self.image_label,
+            image_canvas=self.image_canvas,  # pass canvas instead of label
             status_label=self.status_label,
             on_confirm=self._apply_crop,
         )
@@ -58,6 +59,26 @@ class ImageFunctions:
         # Initialize Keybindings
         self.root.bind("<Left>", lambda e: self.navigate(-1))
         self.root.bind("<Right>", lambda e: self.navigate(1))
+
+        # Mousewheel Zoom
+        # Windows / MacOS
+        self.root.bind("<MouseWheel>", self.zoom_image_scroll)
+        # Linux
+        self.root.bind("<Button-4>", self.zoom_image_scroll)
+        self.root.bind("<Button-5>", self.zoom_image_scroll)
+
+        # Zoom Initializers
+        self.zoom_level = tk.DoubleVar(value=1.0)
+        self.zoom_var = tk.DoubleVar(value=100.0)
+        self.fit_zoom_level = None
+        self.zoom_level_raw = 1.0          # raw scale factor used for rendering
+        self.zoom_label = zoom_label
+        self.zoom_slider = None
+        self.drag_start = None
+
+        # Dragging buttons
+        self.image_canvas.bind("<ButtonPress-1>", self.drag_start_handler)
+        self.image_canvas.bind("<B1-Motion>", self.drag_move_handler)
 
     # --- Backend Functions -------------------------------------------------------------
 
@@ -139,6 +160,20 @@ class ImageFunctions:
         except Exception as e:
             self.status_label.config(text=f"Error saving image: {e}")
 
+    def save_image_overwrite(self):
+        """Save the currently displayed image, overwriting the original file."""
+        if not self.image_files:
+            self.status_label.config(text="No images loaded.")
+            return
+
+        current_file = self.image_files[self.current_index]
+
+        try:
+            self.original_image.save(current_file)
+            self.status_label.config(text=f"Image saved: {current_file}")
+        except Exception as e:
+            self.status_label.config(text=f"Error saving image: {e}")
+
     def delete_image(self):
         """Sends current image to the recycle bin using send2trash, then updates the image list and display."""
         if not self.image_files:
@@ -160,7 +195,7 @@ class ImageFunctions:
             self.status_label.config(text=f"Trashed: {os.path.basename(file_to_delete)}")
         else:
             self.original_image = None
-            self.image_label.config(image="")
+            self.image_canvas.delete("image")
             self.status_label.config(text="No images left in folder.")
 
     def get_metadata(self):
@@ -212,8 +247,6 @@ class ImageFunctions:
     # --- Displaying Images -------------------------------------------------------------
 
     def display_image(self, file_path):
-        """Load the image and trigger a resize based on window size."""
-        # Reset transformations and undo/redo stacks when loading a new image
         self.stack_undo.clear()
         self.stack_redo.clear()
         self.current_crop = None
@@ -221,7 +254,13 @@ class ImageFunctions:
         self.current_filter = None
 
         self._render_image(Image.open(file_path))
+        self._sync_slider(100.0)
         self.status_label.config(text=os.path.basename(file_path))
+        # Reset pan
+        orig_w, orig_h = self.original_image.size if self.original_image else (0, 0)
+        cx = self.image_canvas.winfo_width() // 2
+        cy = self.image_canvas.winfo_height() // 2
+        self.image_canvas.coords("image", cx, cy)
 
     def _render_image(self, image=None):
         if image is None:
@@ -230,6 +269,19 @@ class ImageFunctions:
         self.original_image = image
         self._last_resize_dims = None
         self.resize_image()
+
+    def _display_photo(self, photo, reset_pan=False):
+        if reset_pan:
+            cx = self.image_canvas.winfo_width() // 2
+            cy = self.image_canvas.winfo_height() // 2
+        else:
+            coords = self.image_canvas.coords("image")
+            cx = coords[0] if coords else self.image_canvas.winfo_width() // 2
+            cy = coords[1] if coords else self.image_canvas.winfo_height() // 2
+
+        self.image_canvas.delete("image")
+        self.image_canvas.create_image(cx, cy, anchor="center", image=photo, tags="image")
+        self.image_canvas.photo = photo
 
     def resize_image(self, event=None):
         """Resize the currently displayed image to fit within the window while preserving aspect ratio."""
@@ -249,6 +301,7 @@ class ImageFunctions:
 
         orig_w, orig_h = self.original_image.size
         scale = min(target_w / orig_w, available_h / orig_h)
+        self.fit_zoom_level = scale
 
         display_img = self.original_image if scale >= 1.0 else \
             self.original_image.resize(
@@ -256,11 +309,83 @@ class ImageFunctions:
                 Image.LANCZOS
             )
 
-        photo = ImageTk.PhotoImage(display_img)
-        self.image_label.config(image=photo)
-        self.image_label.photo = photo
+        self._display_photo(ImageTk.PhotoImage(display_img), reset_pan=True)
 
         self._last_resize_dims = (window_w, window_h)
+
+    # --- Zoom Functions --------------------------------------------
+
+    def zoom_image_scroll(self, event):
+        if self.original_image is None:
+            return
+        delta = 1 if event.delta > 0 else -1
+        self.set_zoom(self.zoom_level.get() * (1.1 ** delta))
+
+    def set_zoom(self, level):
+        """Set zoom by raw scale factor."""
+        if self.original_image is None:
+            return
+
+        self.zoom_level_raw = max(0.01, level)
+
+        orig_w, orig_h = self.original_image.size
+        new_w = max(1, int(orig_w * self.zoom_level_raw))
+        new_h = max(1, int(orig_h * self.zoom_level_raw))
+
+        display_img = self.original_image.resize((new_w, new_h), Image.BILINEAR)
+        self._display_photo(ImageTk.PhotoImage(display_img))
+
+        if self.zoom_label is not None and self.fit_zoom_level:
+            percent = (self.zoom_level_raw / self.fit_zoom_level) * 100
+            self.zoom_label.config(text=f"{int(percent)}%")
+            self._sync_slider(percent)
+
+    def set_zoom_percent(self, percent):
+        """Set zoom from a fit-relative percentage. Called by the slider."""
+        if self.fit_zoom_level is None:
+            return
+        self.set_zoom(self.fit_zoom_level * (percent / 100.0))
+
+    def _sync_slider(self, percent):
+        clamped = max(10.0, min(800.0, percent))
+        self.zoom_label.config(text=f"{int(clamped)}%")
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.set(clamped)
+
+    def drag_start_handler(self, event):
+        self.drag_start = (event.x, event.y)
+
+    def drag_move_handler(self, event):
+        if self.drag_start is None:
+            return
+        if self.zoom_level_raw <= self.fit_zoom_level:
+            self.drag_start = (event.x, event.y)
+            return
+
+        dx = event.x - self.drag_start[0]
+        dy = event.y - self.drag_start[1]
+        self.image_canvas.move("image", dx, dy)
+        self.drag_start = (event.x, event.y)
+
+        # Clamp so image edges can't be dragged past canvas edges
+        canvas_w = self.image_canvas.winfo_width()
+        canvas_h = self.image_canvas.winfo_height()
+
+        orig_w, orig_h = self.original_image.size
+        img_w = int(orig_w * self.zoom_level_raw)
+        img_h = int(orig_h * self.zoom_level_raw)
+
+        x, y = self.image_canvas.coords("image")
+
+        # x, y is the center of the image (anchor="center")
+        half_w = img_w // 2
+        half_h = img_h // 2
+
+        clamped_x = max(half_w - max(0, img_w - canvas_w), min(canvas_w - half_w + max(0, img_w - canvas_w), x))
+        clamped_y = max(half_h - max(0, img_h - canvas_h), min(canvas_h - half_h + max(0, img_h - canvas_h), y))
+
+        if clamped_x != x or clamped_y != y:
+            self.image_canvas.coords("image", clamped_x, clamped_y)
 
     # --- Navigation -------------------------------------------------------------
 
@@ -469,53 +594,53 @@ class ImageFunctions:
             self._render_image()
         else:
             self.original_image = None
-            self.image_label.config(image="")
+            self.image_canvas.delete("image")
             self.status_label.config(text="No images left.")
 
     # --- Auto Sort Function -------------------------------------------------------------
 
     def auto_sort_images(self, nsfw_mode=False):
-            """Sorts images into subfolders based on their labels using CLIP. If nsfw_mode is True, sorts into NSFW vs SFW instead."""
-            if not self.image_files:
-                self.status_label.config(text="No images loaded.")
-                return
-            if not nsfw_mode and not self.labels:
-                self.status_label.config(text="No labels defined. Please add labels with Manage Labels.")
-                return
-            if self.autolabeler is None:
-                self.autolabeler = CLIPLabeler()
+        """Sorts images into subfolders based on their labels using CLIP. If nsfw_mode is True, sorts into NSFW vs SFW instead."""
+        if not self.image_files:
+            self.status_label.config(text="No images loaded.")
+            return
+        if not nsfw_mode and not self.labels:
+            self.status_label.config(text="No labels defined. Please add labels with Manage Labels.")
+            return
+        if self.autolabeler is None:
+            self.autolabeler = CLIPLabeler()
 
-            labels = self.labels if not nsfw_mode else ["NSFW photo", "SFW photo"]
+        labels = self.labels if not nsfw_mode else ["NSFW photo", "SFW photo"]
 
-            loading = Toplevel(self.root)
-            loading.title("Please Wait")
-            loading.transient(self.root)
-            loading.grab_set()
+        loading = Toplevel(self.root)
+        loading.title("Please Wait")
+        loading.transient(self.root)
+        loading.grab_set()
 
-            if nsfw_mode:
-                Label(loading, text="Sorting NSFW images...", padx=20, pady=20).pack()
-            else:
-                Label(loading, text="Sorting images by label...", padx=20, pady=20).pack()
-            loading.update()
+        if nsfw_mode:
+            Label(loading, text="Sorting NSFW images...", padx=20, pady=20).pack()
+        else:
+            Label(loading, text="Sorting images by label...", padx=20, pady=20).pack()
+        loading.update()
 
-            folder = os.path.dirname(self.image_files[0])
-            count = len(self.image_files)
-            text_tokens = self.autolabeler.initialize_clip_labels(labels)
+        folder = os.path.dirname(self.image_files[0])
+        count = len(self.image_files)
+        text_tokens = self.autolabeler.initialize_clip_labels(labels)
 
-            for subfolder in set(labels):
-                os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
+        for subfolder in set(labels):
+            os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
 
-            for file in self.image_files:
-                label = self.autolabeler.get_clip_label(file, labels, text_tokens)
-                labeled_folder = os.path.join(folder, label)
-                shutil.move(file, self.unique_dest(labeled_folder, os.path.basename(file)))
+        for file in self.image_files:
+            label = self.autolabeler.get_clip_label(file, labels, text_tokens)
+            labeled_folder = os.path.join(folder, label)
+            shutil.move(file, self.unique_dest(labeled_folder, os.path.basename(file)))
 
-            loading.destroy()
-            self.image_files.clear()
-            self.current_index = 0
-            self.original_image = None
-            self.image_label.config(image="")
-            self.status_label.config(text=f"Sorted {count} images into {len(labels)} label(s).")
+        loading.destroy()
+        self.image_files.clear()
+        self.current_index = 0
+        self.original_image = None
+        self.image_canvas.delete("image")
+        self.status_label.config(text=f"Sorted {count} images into {len(labels)} label(s).")
 
     # --- Crop Functions -------------------------------------------------------------
 
@@ -555,7 +680,7 @@ class ImageFunctions:
             self.display_image(self.image_files[self.current_index])
         else:
             self.original_image = None
-            self.image_label.config(image="")
+            self.image_canvas.delete("image")
         self.status_label.config(text=f"Trashed {len(to_delete)} image(s).")
 
     # --- Rename Photo Function -------------------------------------------------------------
