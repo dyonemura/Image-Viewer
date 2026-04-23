@@ -23,7 +23,7 @@ class CropOverlay:
     __slots__ = (
         "_canvas",
         "_root",
-        "_image_label",
+        "image_canvas",
         "_status_label",
         "_on_confirm",
         # per-session state (set fresh each call to start())
@@ -36,7 +36,7 @@ class CropOverlay:
         "_drag_corner",
     )
 
-    def __init__(self, parent, root, image_label, status_label, on_confirm):
+    def __init__(self, parent, root, image_canvas, status_label, on_confirm):
         """
         Parameters
         ----------
@@ -47,7 +47,7 @@ class CropOverlay:
         on_confirm   : callable(x1, y1, x2, y2) — called with image-space crop coords
         """
         self._root = root
-        self._image_label = image_label
+        self.image_canvas = image_canvas
         self._status_label = status_label
         self._on_confirm = on_confirm
 
@@ -74,11 +74,11 @@ class CropOverlay:
             self._status_label.config(text="No image loaded.")
             return
 
-        self._image_label.update_idletasks()
-        x = self._image_label.winfo_x()
-        y = self._image_label.winfo_y()
-        w = self._image_label.winfo_width()
-        h = self._image_label.winfo_height()
+        self.image_canvas.update_idletasks()
+        x = self.image_canvas.winfo_x()
+        y = self.image_canvas.winfo_y()
+        w = self.image_canvas.winfo_width()
+        h = self.image_canvas.winfo_height()
 
         canvas = self._canvas
         canvas.place(x=x, y=y, width=w, height=h)
@@ -155,6 +155,7 @@ class CropOverlay:
         self._on_confirm(img_x1, img_y1, img_x2, img_y2)
 
     def cancel(self):
+        """Cancel cropping and hide the overlay without doing anything."""
         self._teardown()
         self._status_label.config(text="Crop cancelled.")
 
@@ -163,6 +164,7 @@ class CropOverlay:
     # ------------------------------------------------------------------ #
 
     def _on_press(self, event):
+        """Determine if user is starting a new crop or dragging an existing corner."""
         corners = self._corners()
         r = type(self)._HANDLE_R + 4  # slightly larger hit area than drawn handle
         for i, (cx, cy) in enumerate(corners):
@@ -183,6 +185,7 @@ class CropOverlay:
         )
 
     def _on_drag(self, event):
+        """Update the crop rect as the user drags, either resizing from a corner or creating a new rect."""
         x, y = self._clamp(event.x, event.y)
         canvas = self._canvas
 
@@ -205,6 +208,7 @@ class CropOverlay:
         self._draw_handles()
 
     def _on_release(self, event):
+        """Clear drag state on mouse release."""
         self._drag_corner = None
         self._draw_handles()
 
@@ -220,6 +224,7 @@ class CropOverlay:
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
 
     def _draw_handles(self):
+        """Draw corner handles on the current rect."""
         canvas = self._canvas
         canvas.delete("handle")
         r = type(self)._HANDLE_R
@@ -255,10 +260,12 @@ class CropOverlay:
     # ------------------------------------------------------------------ #
 
     def _clamp(self, x, y):
+        """Clamp canvas coordinates to the displayed image area."""
         left, top, right, bottom = self._bounds
         return max(left, min(x, right)), max(top, min(y, bottom))
 
     def _teardown(self):
+        """Unbind events, hide canvas, and clear state after confirming or cancelling."""
         canvas = self._canvas
         canvas.unbind("<ButtonPress-1>")
         canvas.unbind("<B1-Motion>")
