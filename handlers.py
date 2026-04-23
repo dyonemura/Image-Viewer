@@ -20,7 +20,7 @@ class ImageFunctions:
                   "labels", "image_files", "current_index", "original_image", "stack_undo",
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector",
                   "autolabeler", "current_crop", "_last_resize_dims","_crop_overlay", "_thumb_cache",
-                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_var", "zoom_slider", "drag_start")
+                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start")
 
     def __init__(self, root, image_canvas, status_label, settings, zoom_label=None):
         # UI references
@@ -68,10 +68,8 @@ class ImageFunctions:
         self.root.bind("<Button-5>", self.zoom_image_scroll)
 
         # Zoom Initializers
-        self.zoom_level = tk.DoubleVar(value=1.0)
-        self.zoom_var = tk.DoubleVar(value=100.0)
         self.fit_zoom_level = None
-        self.zoom_level_raw = 1.0          # raw scale factor used for rendering
+        self.zoom_level_raw = 1.0
         self.zoom_label = zoom_label
         self.zoom_slider = None
         self.drag_start = None
@@ -319,25 +317,53 @@ class ImageFunctions:
         if self.original_image is None:
             return
         delta = 1 if event.delta > 0 else -1
-        self.set_zoom(self.zoom_level.get() * (1.1 ** delta))
+        self.set_zoom(self.zoom_level_raw * (1.1 ** delta))
 
-    def set_zoom(self, level):
-        """Set zoom by raw scale factor."""
+    def set_zoom(self, level, anchor_x=None, anchor_y=None):
         if self.original_image is None:
             return
 
-        self.zoom_level_raw = max(0.01, level)
+        new_raw = max(0.01, level)
+        if new_raw == self.zoom_level_raw:
+            return
 
+        canvas_w = self.image_canvas.winfo_width()
+        canvas_h = self.image_canvas.winfo_height()
+        center_x = canvas_w / 2
+        center_y = canvas_h / 2
+
+        coords = self.image_canvas.coords("image")
+        if coords:
+            cur_x, cur_y = coords
+        else:
+            cur_x, cur_y = center_x, center_y
+
+        if anchor_x is None:
+            anchor_x = center_x
+        if anchor_y is None:
+            anchor_y = center_y
+
+        ratio = new_raw / self.zoom_level_raw
+        anchored_x = anchor_x - (anchor_x - cur_x) * ratio
+        anchored_y = anchor_y - (anchor_y - cur_y) * ratio
+
+        self.zoom_level_raw = new_raw
         orig_w, orig_h = self.original_image.size
-        new_w = max(1, int(orig_w * self.zoom_level_raw))
-        new_h = max(1, int(orig_h * self.zoom_level_raw))
+        new_w = max(1, int(orig_w * new_raw))
+        new_h = max(1, int(orig_h * new_raw))
 
         display_img = self.original_image.resize((new_w, new_h), Image.BILINEAR)
         self._display_photo(ImageTk.PhotoImage(display_img))
 
-        if self.zoom_label is not None and self.fit_zoom_level:
-            percent = (self.zoom_level_raw / self.fit_zoom_level) * 100
-            self.zoom_label.config(text=f"{int(percent)}%")
+        # Reset to center if at or below fit zoom, otherwise apply anchored position
+        if self.fit_zoom_level and new_raw <= self.fit_zoom_level:
+            self.image_canvas.coords("image", center_x, center_y)
+        else:
+            self.image_canvas.coords("image", anchored_x, anchored_y)
+
+        fit = self.fit_zoom_level
+        if self.zoom_label is not None and fit:
+            percent = (new_raw / fit) * 100
             self._sync_slider(percent)
 
     def set_zoom_percent(self, percent):
@@ -349,7 +375,7 @@ class ImageFunctions:
     def _sync_slider(self, percent):
         clamped = max(10.0, min(800.0, percent))
         self.zoom_label.config(text=f"{int(clamped)}%")
-        if hasattr(self, 'zoom_slider'):
+        if self.zoom_slider is not None:
             self.zoom_slider.set(clamped)
 
     def drag_start_handler(self, event):
@@ -358,7 +384,10 @@ class ImageFunctions:
     def drag_move_handler(self, event):
         if self.drag_start is None:
             return
-        if self.zoom_level_raw <= self.fit_zoom_level:
+
+        fit = self.fit_zoom_level
+        raw = self.zoom_level_raw
+        if raw <= fit:
             self.drag_start = (event.x, event.y)
             return
 
@@ -367,22 +396,20 @@ class ImageFunctions:
         self.image_canvas.move("image", dx, dy)
         self.drag_start = (event.x, event.y)
 
-        # Clamp so image edges can't be dragged past canvas edges
         canvas_w = self.image_canvas.winfo_width()
         canvas_h = self.image_canvas.winfo_height()
-
-        orig_w, orig_h = self.original_image.size
-        img_w = int(orig_w * self.zoom_level_raw)
-        img_h = int(orig_h * self.zoom_level_raw)
+        orig_w, orig_h = self.original_image.size  # cached once
+        img_w = int(orig_w * raw)
+        img_h = int(orig_h * raw)
+        half_w, half_h = img_w // 2, img_h // 2
 
         x, y = self.image_canvas.coords("image")
 
-        # x, y is the center of the image (anchor="center")
-        half_w = img_w // 2
-        half_h = img_h // 2
-
-        clamped_x = max(half_w - max(0, img_w - canvas_w), min(canvas_w - half_w + max(0, img_w - canvas_w), x))
-        clamped_y = max(half_h - max(0, img_h - canvas_h), min(canvas_h - half_h + max(0, img_h - canvas_h), y))
+        # Clamp: how far the image overhangs each edge
+        overflow_x = max(0, img_w - canvas_w)
+        overflow_y = max(0, img_h - canvas_h)
+        clamped_x = max(half_w - overflow_x, min(canvas_w - half_w + overflow_x, x))
+        clamped_y = max(half_h - overflow_y, min(canvas_h - half_h + overflow_y, y))
 
         if clamped_x != x or clamped_y != y:
             self.image_canvas.coords("image", clamped_x, clamped_y)

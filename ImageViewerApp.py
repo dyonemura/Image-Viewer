@@ -50,10 +50,10 @@ tk.Button(nav_frame, text="Mass Delete", command=image_functions.open_mass_delet
 # --- Bottom Bar Buttons ------------------------------------------------------
 
 tk.Button(bottom_bar, text="−", width=2,
-          command=lambda: image_functions.set_zoom(image_functions._zoom_raw / 1.1)).pack(side="left")
+          command=lambda: image_functions.set_zoom(image_functions.zoom_level_raw / 1.1)).pack(side="left")
 
 tk.Button(bottom_bar, text="+", width=2,
-          command=lambda: image_functions.set_zoom(image_functions._zoom_raw * 1.1)).pack(side="left")
+          command=lambda: image_functions.set_zoom(image_functions.zoom_level_raw * 1.1)).pack(side="left")
 
 # Reset button
 tk.Button(bottom_bar, text="Reset", command=lambda:  image_functions.set_zoom_percent(100)).pack(side="left", padx=4)
@@ -66,7 +66,7 @@ zoom_slider = tk.Scale(
     command=lambda val: image_functions.set_zoom_percent(float(val))
 )
 
-image_functions._zoom_slider = zoom_slider
+image_functions.zoom_slider = zoom_slider
 
 zoom_slider.pack(side="left", padx=4)
 zoom_label.pack(side="left", padx=4)
