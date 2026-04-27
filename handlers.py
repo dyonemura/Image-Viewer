@@ -20,7 +20,7 @@ class ImageFunctions:
                   "labels", "image_files", "current_index", "original_image", "stack_undo",
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector",
                   "autolabeler", "current_crop", "_last_resize_dims","_crop_overlay", "_thumb_cache",
-                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start")
+                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start", "_zoom_hq_after")
 
     def __init__(self, root, image_canvas, status_label, settings, zoom_label=None):
         # UI references
@@ -298,18 +298,19 @@ class ImageFunctions:
         target_w = window_w - 40
 
         orig_w, orig_h = self.original_image.size
-        scale = min(target_w / orig_w, available_h / orig_h)
-        self.fit_zoom_level = scale
+        new_fit = min(target_w / orig_w, available_h / orig_h)
 
-        display_img = self.original_image if scale >= 1.0 else \
-            self.original_image.resize(
-                (int(orig_w * scale), int(orig_h * scale)),
-                Image.LANCZOS
-            )
+        # Preserve the user's zoom ratio relative to fit across the resize
+        if self.fit_zoom_level and self.zoom_level_raw > self.fit_zoom_level:
+            zoom_ratio = self.zoom_level_raw / self.fit_zoom_level
+        else:
+            zoom_ratio = 1.0
 
-        self._display_photo(ImageTk.PhotoImage(display_img), reset_pan=True)
-
+        self.fit_zoom_level = new_fit
         self._last_resize_dims = (window_w, window_h)
+
+        # Apply the preserved ratio to the new fit level
+        self.set_zoom(new_fit * zoom_ratio)
 
     # --- Zoom Functions --------------------------------------------
 
@@ -352,10 +353,10 @@ class ImageFunctions:
         new_w = max(1, int(orig_w * new_raw))
         new_h = max(1, int(orig_h * new_raw))
 
-        display_img = self.original_image.resize((new_w, new_h), Image.BILINEAR)
+        # Phase 1: fast nearest-neighbour preview while scrolling
+        display_img = self.original_image.resize((new_w, new_h), Image.NEAREST)
         self._display_photo(ImageTk.PhotoImage(display_img))
 
-        # Reset to center if at or below fit zoom, otherwise apply anchored position
         if self.fit_zoom_level and new_raw <= self.fit_zoom_level:
             self.image_canvas.coords("image", center_x, center_y)
         else:
@@ -365,6 +366,27 @@ class ImageFunctions:
         if self.zoom_label is not None and fit:
             percent = (new_raw / fit) * 100
             self._sync_slider(percent)
+
+        # Phase 2: schedule a high-quality re-render after scrolling settles
+        if hasattr(self, '_zoom_hq_after'):
+            self.root.after_cancel(self._zoom_hq_after)
+        self._zoom_hq_after = self.root.after(120, self._render_zoom_hq)
+
+    def _render_zoom_hq(self):
+        """Render the current zoom level at full quality after scrolling stops."""
+        if self.original_image is None:
+            return
+        orig_w, orig_h = self.original_image.size
+        new_w = max(1, int(orig_w * self.zoom_level_raw))
+        new_h = max(1, int(orig_h * self.zoom_level_raw))
+
+        display_img = self.original_image.resize((new_w, new_h), Image.LANCZOS)
+
+        # Preserve current pan position
+        coords = self.image_canvas.coords("image")
+        self._display_photo(ImageTk.PhotoImage(display_img))
+        if coords:
+            self.image_canvas.coords("image", coords[0], coords[1])
 
     def set_zoom_percent(self, percent):
         """Set zoom from a fit-relative percentage. Called by the slider."""
