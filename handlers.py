@@ -19,8 +19,8 @@ class ImageFunctions:
     __slots__ = ("root", "image_canvas", "status_label", "confirm_deletes", "fast_delete",
                   "labels", "image_files", "current_index", "original_image", "stack_undo",
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector",
-                  "autolabeler", "current_crop", "_last_resize_dims","_crop_overlay", "_thumb_cache",
-                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start", "_zoom_hq_after")
+                  "autolabeler", "current_crop", "last_resize_dims","crop_overlay", "thumb_cache",
+                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start", "zoom_hq_after")
 
     def __init__(self, root, image_canvas, status_label, settings, zoom_label=None):
         # UI references
@@ -38,8 +38,8 @@ class ImageFunctions:
         self.current_crop = None
         self.current_filter = None
         self.original_image = None
-        self._last_resize_dims = None
-        self._thumb_cache = {}
+        self.last_resize_dims = None
+        self.thumb_cache = {}
 
         # Undo/Redo stacks
         self.stack_redo = []
@@ -48,7 +48,7 @@ class ImageFunctions:
         # Subsystems
         self.autolabeler = None
         self.duplicate_detector = None
-        self._crop_overlay = CropOverlay(
+        self.crop_overlay = CropOverlay(
             parent=self.image_canvas.master,
             root=self.root,
             image_canvas=self.image_canvas,  # pass canvas instead of label
@@ -100,7 +100,7 @@ class ImageFunctions:
                 entry.path
                 for entry in entries
                 if entry.is_file(follow_symlinks=False)
-                and entry.name.lower().endswith(tuple(exts))
+                and os.path.splitext(entry.name)[1].lower() in exts
             )
 
         self.current_index = bisect_left(self.image_files, file_path)
@@ -265,7 +265,8 @@ class ImageFunctions:
             image = Image.open(self.image_files[self.current_index])
 
         self.original_image = image
-        self._last_resize_dims = None
+        self.last_resize_dims = None
+        self.zoom_level_raw = 0  # ← force set_zoom to re-render even if zoom level is unchanged
         self.resize_image()
 
     def _display_photo(self, photo, reset_pan=False):
@@ -291,8 +292,8 @@ class ImageFunctions:
 
         if window_w < 200 or window_h < 200:
             return
-        if (window_w, window_h) == getattr(self, '_last_resize_dims', None):
-            return
+        #if (window_w, window_h) == self.last_resize_dims:
+        #    return
 
         available_h = max(50, window_h - 100)
         target_w = window_w - 40
@@ -307,7 +308,7 @@ class ImageFunctions:
             zoom_ratio = 1.0
 
         self.fit_zoom_level = new_fit
-        self._last_resize_dims = (window_w, window_h)
+        self.last_resize_dims = (window_w, window_h)
 
         # Apply the preserved ratio to the new fit level
         self.set_zoom(new_fit * zoom_ratio)
@@ -344,9 +345,14 @@ class ImageFunctions:
         if anchor_y is None:
             anchor_y = center_y
 
-        ratio = new_raw / self.zoom_level_raw
-        anchored_x = anchor_x - (anchor_x - cur_x) * ratio
-        anchored_y = anchor_y - (anchor_y - cur_y) * ratio
+        # ← guard: skip anchor math on the first render (zoom_level_raw == 0)
+        if self.zoom_level_raw > 0:
+            ratio = new_raw / self.zoom_level_raw
+            anchored_x = anchor_x - (anchor_x - cur_x) * ratio
+            anchored_y = anchor_y - (anchor_y - cur_y) * ratio
+        else:
+            anchored_x = center_x
+            anchored_y = center_y
 
         self.zoom_level_raw = new_raw
         orig_w, orig_h = self.original_image.size
@@ -368,9 +374,9 @@ class ImageFunctions:
             self._sync_slider(percent)
 
         # Phase 2: schedule a high-quality re-render after scrolling settles
-        if hasattr(self, '_zoom_hq_after'):
-            self.root.after_cancel(self._zoom_hq_after)
-        self._zoom_hq_after = self.root.after(120, self._render_zoom_hq)
+        if hasattr(self, 'zoom_hq_after'):
+            self.root.after_cancel(self.zoom_hq_after)
+        self.zoom_hq_after = self.root.after(120, self._render_zoom_hq)
 
     def _render_zoom_hq(self):
         """Render the current zoom level at full quality after scrolling stops."""
@@ -563,56 +569,34 @@ class ImageFunctions:
 
     # --- Undo/Redo Functions -------------------------------------------------------------
 
+    def history_func(self, source_stack, dest_stack, verb):
+        if not source_stack:
+            self.status_label.config(text=f"Nothing to {verb}.")
+            return
+        
+        action, value = source_stack.pop()
+        state_map = {
+            "rotate": ("current_rotation", f"{verb.capitalize()}d rotation — {value}°."),
+            "filter": ("current_filter",   f"{verb.capitalize()}d filter."),
+            "crop":   ("current_crop",     f"{verb.capitalize()}d crop."),
+        }
+
+        if action not in state_map:
+            self.status_label.config(text=f"Unknown action to {verb}.")
+            return
+        
+        attr, message = state_map[action]
+        dest_stack.append((action, getattr(self, attr)))  # save current state
+        setattr(self, attr, value)                         # apply the historical state
+        self.status_label.config(text=message)
+        self._render_image(self._get_edited_image())
+    
     def undo(self):
-        if not self.stack_undo:
-            self.status_label.config(text="Nothing to undo.")
-            return
-
-        last_action, value = self.stack_undo.pop()
-
-        if last_action == "rotate":
-            self.stack_redo.append(("rotate", self.current_rotation))
-            self.current_rotation = value
-            self.status_label.config(text=f"Undid rotation — back to {value}°.")
-        elif last_action == "filter":
-            self.stack_redo.append(("filter", self.current_filter))
-            self.current_filter = value
-            self.status_label.config(text="Undid filter.")
-        elif last_action == "crop":
-            self.stack_redo.append(("crop", self.current_crop))
-            self.current_crop = value
-            self.status_label.config(text="Undid crop.")
-        else:
-            self.status_label.config(text="Unknown action to undo.")
-            return
-
-        self._render_image(self._get_edited_image())
-
+        self.history_func(self.stack_undo, self.stack_redo, "undo")
+    
     def redo(self):
-        """Redo the last undone transformation."""
-        if not self.stack_redo:
-            self.status_label.config(text="Nothing to redo.")
-            return
+        self.history_func(self.stack_redo, self.stack_undo, "redo")
 
-        action, value = self.stack_redo.pop()
-
-        if action == "rotate":
-            self.stack_undo.append(("rotate", self.current_rotation))
-            self.current_rotation = value
-            self.status_label.config(text=f"Redid rotation of {value} degrees.")
-        elif action == "filter":
-            self.stack_undo.append(("filter", self.current_filter))
-            self.current_filter = value
-            self.status_label.config(text="Redid filter.")
-        elif action == "crop":
-            self.stack_undo.append(("crop", self.current_crop))
-            self.current_crop = value
-            self.status_label.config(text="Redid crop.")
-        else:
-            self.status_label.config(text="Unknown action to redo.")
-            return
-
-        self._render_image(self._get_edited_image())
 
     # --- Fast Delete Mode -------------------------------------------------------------
 
@@ -697,7 +681,7 @@ class ImageFunctions:
         if not self.image_files or self.original_image is None:
             self.status_label.config(text="No image loaded.")
             return
-        self._crop_overlay.start(self.original_image, self.current_crop)
+        self.crop_overlay.start(self.original_image, self.current_crop)
 
     def _apply_crop(self, x1, y1, x2, y2):
         self.stack_undo.append(("crop", self.current_crop))
@@ -715,7 +699,7 @@ class ImageFunctions:
         MassDeleteDialog(
             parent=self.root,
             image_files=self.image_files,
-            thumb_cache=self._thumb_cache,
+            thumb_cache=self.thumb_cache,
             confirm_deletes=self.confirm_deletes,
             on_confirm=self._on_mass_delete,
         )
