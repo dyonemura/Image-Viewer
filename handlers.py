@@ -20,7 +20,7 @@ class ImageFunctions:
                   "labels", "image_files", "current_index", "original_image", "stack_undo",
                   "stack_redo", "current_rotation", "current_filter", "duplicate_detector",
                   "autolabeler", "current_crop", "last_resize_dims","crop_overlay", "thumb_cache",
-                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start", "zoom_hq_after")
+                 "zoom_level", "fit_zoom_level", "zoom_label", "zoom_level_raw", "zoom_slider", "drag_start", "zoom_hq_after", "source_image")
 
     def __init__(self, root, image_canvas, status_label, settings, zoom_label=None):
         # UI references
@@ -38,6 +38,7 @@ class ImageFunctions:
         self.current_crop = None
         self.current_filter = None
         self.original_image = None
+        self.source_image = None
         self.last_resize_dims = None
         self.thumb_cache = {}
 
@@ -73,6 +74,7 @@ class ImageFunctions:
         self.zoom_label = zoom_label
         self.zoom_slider = None
         self.drag_start = None
+        self.zoom_hq_after = None
 
         # Dragging buttons
         self.image_canvas.bind("<ButtonPress-1>", self.drag_start_handler)
@@ -115,9 +117,6 @@ class ImageFunctions:
         dest = os.path.join(folder, filename)
         counter = 1
 
-        if not os.path.exists(dest):
-            return dest
-
         while os.path.exists(dest):
             dest = os.path.join(folder, f"{base_name}_{counter}{ext}")
             counter += 1
@@ -136,7 +135,7 @@ class ImageFunctions:
             return
 
         self.load_folder(file_path)
-        self.display_image(self.image_files[self.current_index])
+        self._display_image(self.image_files[self.current_index])
 
     def save_image(self):
         """Open a file dialog to save the currently displayed image to a new location."""
@@ -189,7 +188,7 @@ class ImageFunctions:
 
         if self.image_files:
             self.current_index = min(self.current_index, len(self.image_files) - 1)
-            self.display_image(self.image_files[self.current_index])
+            self._display_image(self.image_files[self.current_index])
             self.status_label.config(text=f"Trashed: {os.path.basename(file_to_delete)}")
         else:
             self.original_image = None
@@ -244,32 +243,32 @@ class ImageFunctions:
 
     # --- Displaying Images -------------------------------------------------------------
 
-    def display_image(self, file_path):
+    def _display_image(self, file_path):
+        """"""
+        # Clear all edits of last photo
         self.stack_undo.clear()
         self.stack_redo.clear()
         self.current_crop = None
-        self.current_rotation = 0
         self.current_filter = None
-
-        self._render_image(Image.open(file_path))
+        self.current_rotation = 0
         self._sync_slider(100.0)
+
         self.status_label.config(text=os.path.basename(file_path))
+        self.source_image = Image.open(file_path)
+        self._update_display(self.source_image.copy())
+        
         # Reset pan
-        orig_w, orig_h = self.original_image.size if self.original_image else (0, 0)
         cx = self.image_canvas.winfo_width() // 2
         cy = self.image_canvas.winfo_height() // 2
         self.image_canvas.coords("image", cx, cy)
 
-    def _render_image(self, image=None):
-        if image is None:
-            image = Image.open(self.image_files[self.current_index])
-
+    def _update_display(self, image):
         self.original_image = image
         self.last_resize_dims = None
         self.zoom_level_raw = 0  # ← force set_zoom to re-render even if zoom level is unchanged
         self.resize_image()
 
-    def _display_photo(self, photo, reset_pan=False):
+    def _place_photo(self, photo, reset_pan=False):
         if reset_pan:
             cx = self.image_canvas.winfo_width() // 2
             cy = self.image_canvas.winfo_height() // 2
@@ -292,8 +291,6 @@ class ImageFunctions:
 
         if window_w < 200 or window_h < 200:
             return
-        #if (window_w, window_h) == self.last_resize_dims:
-        #    return
 
         available_h = max(50, window_h - 100)
         target_w = window_w - 40
@@ -361,7 +358,7 @@ class ImageFunctions:
 
         # Phase 1: fast nearest-neighbour preview while scrolling
         display_img = self.original_image.resize((new_w, new_h), Image.NEAREST)
-        self._display_photo(ImageTk.PhotoImage(display_img))
+        self._place_photo(ImageTk.PhotoImage(display_img))
 
         if self.fit_zoom_level and new_raw <= self.fit_zoom_level:
             self.image_canvas.coords("image", center_x, center_y)
@@ -374,7 +371,7 @@ class ImageFunctions:
             self._sync_slider(percent)
 
         # Phase 2: schedule a high-quality re-render after scrolling settles
-        if hasattr(self, 'zoom_hq_after'):
+        if self.zoom_hq_after is not None:
             self.root.after_cancel(self.zoom_hq_after)
         self.zoom_hq_after = self.root.after(120, self._render_zoom_hq)
 
@@ -390,7 +387,7 @@ class ImageFunctions:
 
         # Preserve current pan position
         coords = self.image_canvas.coords("image")
-        self._display_photo(ImageTk.PhotoImage(display_img))
+        self._place_photo(ImageTk.PhotoImage(display_img))
         if coords:
             self.image_canvas.coords("image", coords[0], coords[1])
 
@@ -448,7 +445,7 @@ class ImageFunctions:
         """Display the next or previous image in the folder. Pass 1 for next, -1 for prev."""
         if self.image_files:
             self.current_index = (self.current_index + direction) % len(self.image_files)
-            self.display_image(self.image_files[self.current_index])
+            self._display_image(self.image_files[self.current_index])
 
     # --- Duplicate Handling -------------------------------------------------------------
 
@@ -472,8 +469,7 @@ class ImageFunctions:
         if duplicates:
             dupes_folder = os.path.join(folder, "Duplicates")
             os.makedirs(dupes_folder, exist_ok=True)
-            for img, reason in duplicates:
-                print(reason)
+            for img, _ in duplicates:
                 shutil.move(img, self.unique_dest(dupes_folder, os.path.basename(img)))
             self.status_label.config(text=f"Moved {len(duplicates)} duplicate(s) to /Duplicates")
         else:
@@ -491,10 +487,10 @@ class ImageFunctions:
             self.stack_undo.append(("filter", self.current_filter))
 
         self.current_filter = None if filter_type == "reset" else filter_type
-        self._render_image(self._get_edited_image())
+        self._update_display(self._get_edited_image())
 
     def _get_edited_image(self):
-        image = Image.open(self.image_files[self.current_index])
+        image = self.source_image.copy()
         if self.current_crop:
             image = image.crop(self.current_crop)
         if self.current_rotation:
@@ -521,7 +517,7 @@ class ImageFunctions:
             self.stack_undo.append(("rotate", self.current_rotation))
 
         self.current_rotation = angle if absolute else (self.current_rotation + angle) % 360
-        self._render_image(self._get_edited_image())
+        self._update_display(self._get_edited_image())
 
     def rotate_custom(self):
         """Open a dialog to enter a custom rotation angle between 0 and 360 degrees."""
@@ -589,14 +585,13 @@ class ImageFunctions:
         dest_stack.append((action, getattr(self, attr)))  # save current state
         setattr(self, attr, value)                         # apply the historical state
         self.status_label.config(text=message)
-        self._render_image(self._get_edited_image())
+        self._update_display(self._get_edited_image())
     
     def undo(self):
         self.history_func(self.stack_undo, self.stack_redo, "undo")
     
     def redo(self):
         self.history_func(self.stack_redo, self.stack_undo, "redo")
-
 
     # --- Fast Delete Mode -------------------------------------------------------------
 
@@ -624,7 +619,7 @@ class ImageFunctions:
 
         if self.image_files:
             self.current_index = min(self.current_index, len(self.image_files) - 1)
-            self._render_image()
+            self._display_image(self.image_files[self.current_index])
         else:
             self.original_image = None
             self.image_canvas.delete("image")
@@ -687,7 +682,7 @@ class ImageFunctions:
         self.stack_undo.append(("crop", self.current_crop))
         self.stack_redo.clear()
         self.current_crop = (x1, y1, x2, y2)
-        self._render_image(self._get_edited_image())
+        self._update_display(self._get_edited_image())
         self.status_label.config(text=f"Cropped to {x2 - x1}×{y2 - y1}.")
 
     # --- Multi-Image View --------------------------------------------------------------
@@ -710,7 +705,7 @@ class ImageFunctions:
         self.image_files = [p for p in self.image_files if p not in to_delete]
         if self.image_files:
             self.current_index = min(self.current_index, len(self.image_files) - 1)
-            self.display_image(self.image_files[self.current_index])
+            self._display_image(self.image_files[self.current_index])
         else:
             self.original_image = None
             self.image_canvas.delete("image")
@@ -768,7 +763,7 @@ class ImageFunctions:
 
             os.rename(current_file, new_path)
             self.image_files[self.current_index] = new_path
-            self.display_image(new_path)
+            self._display_image(new_path)
             self.status_label.config(text=f"Renamed to: {new_name}")
             dialog.destroy()
 

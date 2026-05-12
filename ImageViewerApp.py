@@ -1,8 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
 
-
-#from handlers import ImageFunctions
 from handlers import ImageFunctions
 from settings_manager import load_settings, save_settings_json
 
@@ -15,9 +13,6 @@ root.rowconfigure(1, weight=0)  # buttons row stays fixed
 root.columnconfigure(0, weight=1)
 
 # --- Widgets -----------------------------------------------------------------
-
-#image_label = tk.Label(root)
-#image_label.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
 
 image_canvas = tk.Canvas(root, bg=root.cget("bg"), highlightthickness=0, bd=0)
 image_canvas.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
@@ -265,6 +260,6 @@ menubar.add_cascade(label="Help", menu=help_menu)
 # --- Finalize ----------------------------------------------------------------
 
 root.config(menu=menubar)
-root.bind("<Configure>", image_functions.resize_image)
+image_canvas.bind("<Configure>", image_functions.resize_image)
 root.protocol("WM_DELETE_WINDOW", on_close)
 root.mainloop()
